@@ -137,6 +137,10 @@ services:
       # if the app itself has auth or you like living on the edge, you can disable tailgates auth.
       # for something like homeassistant which handles its own auth and does not support OIDC without extensions, you'll likely want this.
       - tailgate.dangerouslyDisableAuth=true # default = false
+      # by default tailgate asks search engines not to index the app with an X-Robots-Tag header.
+      # set this to false for something you want showing up in search results, like a public blog.
+      # tailgate's own pages are never indexed
+      - tailgate.noindex=false # default = true
       # the network tailgate reaches the container on, like traefik.docker.network. tailgate has to be on it too.
       # if the container isn't on it, the service won't start and the admin page lists the networks it is on.
       - tailgate.network=sylv_proxy # default = TAILGATE_NETWORK, or the container's first network by name

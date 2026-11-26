@@ -260,6 +260,19 @@ func TestProxyHeaders(t *testing.T) {
 		t.Errorf("got host %q path %q", tg.got.Host, tg.got.URL.Path)
 	}
 
+	// search engines are asked to skip tailgate's pages, and services unless they opt out
+	if v := rec.Header().Get("X-Robots-Tag"); v != "" {
+		t.Errorf("noindex=false service got X-Robots-Tag %q", v)
+	}
+	s := tg.routes["open"]
+	s.Noindex = true
+	tg.routes["open"] = s
+	for _, rec := range []*httptest.ResponseRecorder{do(tg.open, "GET", "https://open.ts.net/", nil), do(tg.funnel, "GET", "https://tailgate.ts.net/login", nil), do(tg.photos, "GET", "https://photos.ts.net/", nil)} {
+		if v := rec.Header().Get("X-Robots-Tag"); v != noindex {
+			t.Errorf("got X-Robots-Tag %q", v)
+		}
+	}
+
 	tg.routes["open"] = service.Service{Name: "open", DangerouslyDisableAuth: true}
 	for _, h := range []http.Handler{tg.open, tg.serviceHandler("unknown")} {
 		if rec := do(h, "GET", "https://open.ts.net/", nil); rec.Code != http.StatusBadGateway || rec.Header().Get("Cache-Control") != "no-store" {

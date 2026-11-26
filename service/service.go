@@ -25,6 +25,7 @@ type Service struct {
 	Port                   int    `expr:"port" desc:"tailgate.port"`
 	Funnel                 bool   `expr:"funnel" desc:"tailgate.funnel"`
 	DangerouslyDisableAuth bool   `expr:"dangerouslyDisableAuth" desc:"tailgate.dangerously-disable-auth"`
+	Noindex                bool   `expr:"noindex" desc:"tailgate.noindex"`
 	Network                string `expr:"network" desc:"tailgate.network, \"\" when it isn't set"`
 	Err                    error  `expr:"-"`
 }
@@ -33,7 +34,7 @@ type Service struct {
 var spellings = map[string]string{}
 
 func init() {
-	for _, key := range []string{"name", "port", "funnel", "dangerously-disable-auth", "network"} {
+	for _, key := range []string{"name", "port", "funnel", "dangerously-disable-auth", "noindex", "network"} {
 		words := strings.Split(key, "-")
 		camel := words[0]
 		for _, w := range words[1:] {
@@ -131,7 +132,8 @@ func parse(labels map[string]string) (Service, bool) {
 		s.Port = int(n)
 	}
 
-	for key, dst := range map[string]*bool{"funnel": &s.Funnel, "dangerously-disable-auth": &s.DangerouslyDisableAuth} {
+	s.Noindex = true
+	for key, dst := range map[string]*bool{"funnel": &s.Funnel, "dangerously-disable-auth": &s.DangerouslyDisableAuth, "noindex": &s.Noindex} {
 		v, ok := values[key]
 		if !ok {
 			continue
@@ -140,6 +142,7 @@ func parse(labels map[string]string) (Service, bool) {
 		case "true":
 			*dst = true
 		case "false":
+			*dst = false
 		default:
 			errs = append(errs, fmt.Errorf("%s=%q must be true or false", seen[key], v))
 		}

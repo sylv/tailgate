@@ -24,7 +24,7 @@ func TestValid(t *testing.T) {
 		"tailgate.dangerously-disable-auth": "false",
 		"traefik.enable":                    "true",
 	})
-	want := Service{Container: "c1", Name: "photos", Port: 2283, Funnel: true}
+	want := Service{Container: "c1", Name: "photos", Port: 2283, Funnel: true, Noindex: true}
 	if s != want {
 		t.Fatalf("got %+v, want %+v", s, want)
 	}
@@ -41,8 +41,11 @@ func TestSpellings(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	s := one(t, map[string]string{"tailgate.name": "photos", "tailgate.port": "2283"})
-	if s.Err != nil || s.Funnel || s.DangerouslyDisableAuth {
+	if s.Err != nil || s.Funnel || s.DangerouslyDisableAuth || !s.Noindex {
 		t.Fatalf("got %+v", s)
+	}
+	if s := one(t, map[string]string{"tailgate.name": "blog", "tailgate.port": "80", "tailgate.noindex": "false"}); s.Err != nil || s.Noindex {
+		t.Fatalf("noindex=false got %+v", s)
 	}
 }
 

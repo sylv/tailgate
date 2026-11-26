@@ -18,7 +18,7 @@ import (
 
 const callbackPath = "/.tailgate/callback"
 
-type upstreamKey struct{}
+type serviceKey struct{}
 
 func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 	transport := &http.Transport{
@@ -31,7 +31,8 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 	return transport, &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(&url.URL{Scheme: "http", Host: r.In.Context().Value(upstreamKey{}).(string)})
+			s := r.In.Context().Value(serviceKey{}).(service.Service)
+			r.SetURL(&url.URL{Scheme: "http", Host: net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))})
 			r.Out.Host = r.In.Host
 			requestOf(r.In.Context()).rules.ApplyRequest(r.Out.Header)
 			stripCredentials(r.Out.Header)
@@ -43,6 +44,9 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 		ModifyResponse: func(res *http.Response) error {
 			// tailgate already set its own on the response
 			res.Header.Del(requestIDHeader)
+			if res.Request.Context().Value(serviceKey{}).(service.Service).Noindex {
+				res.Header.Set("X-Robots-Tag", noindex)
+			}
 			requestOf(res.Request.Context()).rules.ApplyResponse(res.Header)
 			compress(res)
 			return nil
@@ -190,8 +194,7 @@ func (g *gate) proxy(w http.ResponseWriter, r *http.Request, s service.Service) 
 		plain(w, r, http.StatusBadGateway, "The app behind this address isn't running")
 		return
 	}
-	upstream := net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))
-	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), upstreamKey{}, upstream)))
+	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceKey{}, s)))
 }
 
 func (g *gate) callback(w http.ResponseWriter, r *http.Request, name string) {

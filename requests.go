@@ -11,7 +11,10 @@ import (
 	"github.com/sylv/tailgate/rules"
 )
 
-const requestIDHeader = "X-Tailgate-Request-Id"
+const (
+	requestIDHeader = "X-Tailgate-Request-Id"
+	noindex         = "noindex, nofollow"
+)
 
 type request struct {
 	id   string
@@ -84,6 +87,7 @@ func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 func plain(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Robots-Tag", noindex)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	w.Write([]byte(msg + "\n\nrequest id: " + requestOf(r.Context()).id + "\n"))

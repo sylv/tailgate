@@ -55,6 +55,7 @@ func (g *gate) web(funnel bool) http.Handler {
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Robots-Tag", noindex)
 		h.ServeHTTP(w, r)
 	}))
 }
