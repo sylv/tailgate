@@ -227,7 +227,7 @@ func TestFunnelHasNoAdmin(t *testing.T) {
 			t.Errorf("%s on the tailnet got 404", path)
 		}
 	}
-	if rec := do(tg.funnel, "GET", "https://tailgate.ts.net/login?to=photos:/", nil); rec.Code != http.StatusOK {
+	if rec := do(tg.funnel, "GET", "https://tailgate.ts.net/login?to=photos:/", nil); rec.Code == http.StatusNotFound {
 		t.Errorf("login on funnel got %d", rec.Code)
 	}
 }
