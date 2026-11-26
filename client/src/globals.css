@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/* the tokens from DESIGN.md. components use these, never a raw grey or hex */
+@theme {
+  --color-page: oklch(0.186 0.009 305);
+  --color-surface: oklch(0.215 0.009 305);
+  --color-raised: oklch(0.25 0.009 305);
+  --color-hover: oklch(0.285 0.009 305);
+  --color-pressed: oklch(0.232 0.009 305);
+  --color-line: oklch(0.29 0.009 305);
+  --color-line-strong: oklch(0.38 0.009 305);
+
+  --color-fg: #f1f2f4;
+  --color-fg-muted: #a1a4ab;
+  --color-fg-faint: #71747c;
+
+  --color-brand: #652fcd;
+  --color-brand-hover: #7038dc;
+  --color-brand-pressed: #5826bd;
+  --color-brand-bright: #a98cfa;
+  --color-on-brand: #ffffff;
+
+  --color-danger: #f0776a;
+  --color-warning: #e8b059;
+  --color-success: #7cc39a;
+
+  /* the expression editor's tokens */
+  --color-code-string: #9fd4a8;
+  --color-code-number: #e8b059;
+  --color-code-keyword: #c2a8ff;
+  --color-code-value: #8ec5f5;
+
+  --font-sans: "Figtree Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  --shadow-pop: 0 2px 6px rgb(0 0 0 / 0.3), 0 12px 32px rgb(0 0 0 / 0.45);
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.5, 0, 0.75, 0);
+
+  --animate-pop-in: pop-in 120ms var(--ease-out);
+  --animate-pop-out: pop-out 90ms var(--ease-in);
+  --animate-enter: enter 180ms var(--ease-out);
+
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.96) translateY(-2px);
+    }
+  }
+  @keyframes pop-out {
+    to {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+  }
+  @keyframes enter {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-surface text-sm text-fg;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-bright);
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  summary {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--color-brand);
+    color: var(--color-on-brand);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-hover) transparent;
+  }
+
+  input:-webkit-autofill {
+    -webkit-box-shadow: 0 0 0 1000px var(--color-surface) inset !important;
+    -webkit-text-fill-color: var(--color-fg) !important;
+  }
+
+  h1,
+  h2,
+  h3 {
+    @apply font-semibold tracking-tight;
+  }
+
+  /* the page behind an open dialog doesn't scroll */
+  html:has(dialog[open]) {
+    overflow: hidden;
+  }
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *:not(.animate-spin) {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
