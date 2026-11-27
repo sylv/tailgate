@@ -18,21 +18,39 @@ func open(t *testing.T) *Store {
 	return s
 }
 
-func TestCreateFirstAdmin(t *testing.T) {
+func TestSetup(t *testing.T) {
 	s := open(t)
-	if has, err := s.HasUsers(); err != nil || has {
-		t.Fatalf("got %v, %v", has, err)
+	first, err := s.StartSetup()
+	if err != nil || !strings.HasPrefix(first, "tgs_") {
+		t.Fatalf("got %q, %v", first, err)
 	}
-	key, err := s.CreateFirstAdmin("sylv")
-	if err != nil || !strings.HasPrefix(key, "tg_") {
-		t.Fatalf("got %q, %v", key, err)
+	// a restart while setup is pending makes a new setup key
+	setupKey, _ := s.StartSetup()
+	if _, err := s.FinishSetup(first, "sylv"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old setup key got %v", err)
+	}
+	if pending, _ := s.SetupPending(); !pending {
+		t.Fatal("setup isn't pending")
+	}
+	if _, _, err := s.KeyUser(setupKey); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("signing in with the setup key got %v", err)
+	}
+	key, err := s.FinishSetup(setupKey, "sylv")
+	if err != nil {
+		t.Fatal(err)
 	}
 	u, _, err := s.KeyUser(key)
 	if err != nil || u.Name != "sylv" || !u.Admin || !u.HasAccess("anything") {
 		t.Fatalf("got %+v, %v", u, err)
 	}
-	if _, err := s.CreateFirstAdmin("someone"); !errors.Is(err, ErrNotEmpty) {
+	if _, err := s.FinishSetup(setupKey, "someone"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second setup got %v", err)
+	}
+	if pending, _ := s.SetupPending(); pending {
+		t.Fatal("setup is still pending")
+	}
+	if again, err := s.StartSetup(); again != "" || err != nil {
+		t.Fatalf("setup started again with %q, %v", again, err)
 	}
 }
 
@@ -62,8 +80,16 @@ func TestUsers(t *testing.T) {
 	if err := s.SetAdmin(id, true); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := s.User(id); !u.Admin {
-		t.Fatal("SetAdmin didn't make an admin")
+	if u, _ := s.User(id); !u.Admin || !u.AllServices || !u.HasAccess("lyra") {
+		t.Fatalf("admin got %+v", u)
+	}
+	// an admin's saved choice is kept for when they're demoted
+	if _, err := s.SaveUser(User{ID: id, Name: "ezra", AllServices: true, Services: []string{"photos"}}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetAdmin(id, false)
+	if u, _ := s.User(id); u.AllServices || u.HasAccess("lyra") {
+		t.Fatalf("demoted admin got %+v", u)
 	}
 	if _, err := s.SaveUser(User{ID: "nope", Name: "x"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown id got %v", err)
@@ -176,7 +202,7 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.CreateFirstAdmin("sylv")
+	s.StartSetup()
 	s.db.Exec(`PRAGMA user_version = 99`)
 	s.Close()
 	// a database from a newer tailgate isn't touched

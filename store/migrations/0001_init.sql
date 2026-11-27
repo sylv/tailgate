@@ -14,7 +14,7 @@ CREATE TABLE users (
 
 CREATE TABLE user_services (
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	-- a tailgate.name label, which may have no container right now
+	-- a tailgate.id label, which may have no container right now
 	service TEXT NOT NULL,
 	PRIMARY KEY (user_id, service)
 ) STRICT;

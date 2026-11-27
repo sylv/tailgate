@@ -52,14 +52,14 @@ func TestRun(t *testing.T) {
 		rule(Pre, `ingress == "funnel" && country not in ["AU", "CA"]`, Effect{Type: Block, Value: `"Not in " + country`}),
 		{ID: "log", Section: Pre, Name: "try", Condition: `path startsWith "/mcp"`, Effects: []Effect{{Type: Block}}, Mode: "log"},
 		{ID: "off", Section: Pre, Name: "off", Condition: `true`, Effects: []Effect{{Type: Block}}, Mode: "off"},
-		rule(Post, `service.name == "lyra"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `user.name`}, Effect{Type: SetResponseHeader, Name: "Set-Cookie", Value: `"a=1"`}),
+		rule(Post, `service.id == "lyra"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `user.name`}, Effect{Type: SetResponseHeader, Name: "Set-Cookie", Value: `"a=1"`}),
 		rule(Post, `user.via == "key"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `"key:" + user.name`}, Effect{Type: RemoveRequestHeader, Name: "Referer"}),
 		rule(Post, `header("X-Old") == "1"`, Effect{Type: Redirect, Value: `"https://" + host + "/new"`, Status: 308}),
 	})
 	if errs != nil {
 		t.Fatal(errs)
 	}
-	base := Request{Ingress: "funnel", Country: "NZ", IP: "198.51.100.1", Host: "lyra.ts.net", Path: "/mcp", Service: service.Service{Name: "lyra"},
+	base := Request{Ingress: "funnel", Country: "NZ", IP: "198.51.100.1", Host: "lyra.ts.net", Path: "/mcp", Service: service.Service{ID: "lyra"},
 		Header: func(string) string { return "" }}
 
 	var res Result

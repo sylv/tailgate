@@ -36,6 +36,8 @@ export interface Me {
   // the service from ?to=, and why it can't be signed in to
   target?: string;
   error?: string;
+  ingress: "tailnet" | "funnel";
+  requestId: string;
 }
 
 export interface NewKey {
@@ -47,10 +49,13 @@ export interface NodeInfo {
   url?: string;
   signCommand?: string;
   nodeError?: string;
+  // when a cert is tried again, unix seconds
+  retryAt?: number;
 }
 
 export interface Service extends NodeInfo {
-  name: string;
+  id: string;
+  hostname: string;
   container: string;
   port: number;
   funnel: boolean;
@@ -125,7 +130,9 @@ export interface SchemaValue {
 
 export interface Schema {
   values: SchemaValue[];
+  // the routed services' ids and hostnames
   services: string[];
+  hostnames: string[];
 }
 
 export interface OIDCClient {

@@ -1,6 +1,7 @@
 import { ArrowUpRightIcon } from "@phosphor-icons/react";
 import { api, signOut, type Me } from "../api";
 import { NarrowPage } from "../components/narrow-page";
+import { Note } from "../components/note";
 import { Empty, List } from "../components/section";
 import { POLL, useLoad } from "../hooks/use-load";
 import { cn } from "../lib/utils";
@@ -19,6 +20,7 @@ export function DashboardRoute() {
 
   return (
     <NarrowPage
+      me={me}
       title={me.user.name}
       description={
         me.via === "tailnet" ? `Signed in through the tailnet as ${me.login}` : "Signed in with a key"
@@ -55,8 +57,14 @@ export function DashboardRoute() {
           ))}
         </List>
       )}
+      {me.user.admin && me.ingress === "funnel" && (
+        <Note tone="info" className="mt-4">
+          The admin page is only available on the tailnet. Open this page from a device on your tailnet to use
+          it
+        </Note>
+      )}
       <div className="mt-4 flex justify-between">
-        {me.user.admin ? (
+        {me.user.admin && me.ingress !== "funnel" ? (
           <Button variant="link" asChild>
             <a href="/admin">Admin</a>
           </Button>

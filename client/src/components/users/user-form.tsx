@@ -12,12 +12,12 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
   onSave,
   saveLabel,
 }) => {
-  const { serviceNames } = useAdmin();
+  const { serviceIDs } = useAdmin();
   const [u, setU] = useState(user);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // services that were granted but have no container right now stay listed
-  const names = [...new Set([...serviceNames, ...user.services])].toSorted();
+  const names = [...new Set([...serviceIDs, ...user.services])].toSorted();
   const dirty = !user.id || JSON.stringify(u) !== JSON.stringify(user);
 
   return (
@@ -48,7 +48,7 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
           <Field label="Note">
             <Input
               value={u.note}
-              placeholder="Who this is for, like a brother or a script"
+              placeholder="They're a little silly"
               onChange={(e) => setU({ ...u, note: e.target.value })}
             />
           </Field>
@@ -60,8 +60,9 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
       <Section title="Services">
         <Checkbox
           label="Every service"
-          description="Including ones added later"
+          description={u.admin ? "Admins can reach every service" : "Including ones added later"}
           checked={u.allServices}
+          disabled={u.admin}
           onCheckedChange={(allServices) => setU({ ...u, allServices })}
         />
         {!u.allServices && (

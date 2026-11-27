@@ -19,9 +19,12 @@ const prefix = "tailgate."
 // Service is one container with tailgate labels. A service with Err set
 // isn't routed and has no node. The expr tags are the service.* values rules see
 type Service struct {
-	Container              string `expr:"-"`
-	Addr                   string `expr:"-"`
-	Name                   string `expr:"name" desc:"tailgate.name"`
+	Container string `expr:"-"`
+	Addr      string `expr:"-"`
+	// ID is what tailgate keeps the service's grants, rules, sessions and node state under
+	ID string `expr:"id" desc:"tailgate.id, \"\" for tailgate's own pages"`
+	// Hostname is the node's name on the tailnet, so its domain
+	Hostname               string `expr:"hostname" desc:"tailgate.hostname, or the id when it isn't set"`
 	Port                   int    `expr:"port" desc:"tailgate.port"`
 	Funnel                 bool   `expr:"funnel" desc:"tailgate.funnel"`
 	DangerouslyDisableAuth bool   `expr:"dangerouslyDisableAuth" desc:"tailgate.dangerously-disable-auth"`
@@ -34,7 +37,7 @@ type Service struct {
 var spellings = map[string]string{}
 
 func init() {
-	for _, key := range []string{"name", "port", "funnel", "dangerously-disable-auth", "noindex", "network"} {
+	for _, key := range []string{"id", "hostname", "port", "funnel", "dangerously-disable-auth", "noindex", "network"} {
 		words := strings.Split(key, "-")
 		camel := words[0]
 		for _, w := range words[1:] {
@@ -46,16 +49,17 @@ func init() {
 	}
 }
 
-// the name is the node hostname and its state dir, so it has to be a plain dns label
+// the id names the node's state dir and is the default hostname, so both have to be plain dns labels
 var validName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // FromContainers turns each container's labels into a service. Containers
 // without tailgate labels are skipped. network is TAILGATE_NETWORK, the
 // network to reach containers on when they don't say. The result is sorted by
-// name, then container
+// id, then container
 func FromContainers(containers []docker.Container, network string) []Service {
 	var services []Service
-	byName := map[string][]int{}
+	// an id or hostname used twice breaks every container using it
+	used := map[string][]int{}
 	for _, c := range containers {
 		s, ok := parse(c.Labels)
 		if !ok {
@@ -66,22 +70,26 @@ func FromContainers(containers []docker.Container, network string) []Service {
 		if s.Addr, err = addr(c, cmp.Or(s.Network, networkLabel(c.NetworkLabels), network)); err != nil {
 			s.Err = errors.Join(s.Err, err)
 		}
-		if s.Name != "" {
-			byName[s.Name] = append(byName[s.Name], len(services))
+		if s.ID != "" {
+			used["id "+s.ID] = append(used["id "+s.ID], len(services))
+		}
+		if s.Hostname != "" {
+			used["hostname "+s.Hostname] = append(used["hostname "+s.Hostname], len(services))
 		}
 		services = append(services, s)
 	}
-	for name, idx := range byName {
+	for key, idx := range used {
 		if len(idx) < 2 {
 			continue
 		}
+		kind, value, _ := strings.Cut(key, " ")
 		for _, i := range idx {
-			services[i].Err = errors.Join(services[i].Err, fmt.Errorf("%d containers use the name %q", len(idx), name))
+			services[i].Err = errors.Join(services[i].Err, fmt.Errorf("%d containers use the %s %q", len(idx), kind, value))
 		}
 	}
 	sort.Slice(services, func(i, j int) bool {
-		if services[i].Name != services[j].Name {
-			return services[i].Name < services[j].Name
+		if services[i].ID != services[j].ID {
+			return services[i].ID < services[j].ID
 		}
 		return services[i].Container < services[j].Container
 	})
@@ -115,13 +123,20 @@ func parse(labels map[string]string) (Service, bool) {
 		return s, false
 	}
 
-	switch name := values["name"]; {
-	case name == "":
-		errs = append(errs, errors.New("tailgate.name is required"))
-	case !validName.MatchString(name):
-		errs = append(errs, fmt.Errorf("tailgate.name %q must be lowercase letters, digits and dashes", name))
-	default:
-		s.Name = name
+	for _, key := range []string{"id", "hostname"} {
+		v, ok := values[key]
+		switch {
+		case key == "hostname" && !ok:
+			s.Hostname = s.ID
+		case v == "":
+			errs = append(errs, fmt.Errorf("tailgate.%s is required", key))
+		case !validName.MatchString(v):
+			errs = append(errs, fmt.Errorf("tailgate.%s %q must be lowercase letters, digits and dashes", key, v))
+		case key == "id":
+			s.ID = v
+		default:
+			s.Hostname = v
+		}
 	}
 
 	if port, ok := values["port"]; !ok || port == "" {

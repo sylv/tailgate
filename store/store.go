@@ -34,7 +34,6 @@ const (
 )
 
 var (
-	ErrNotEmpty = errors.New("tailgate already has users")
 	ErrNotFound = errors.New("not found")
 	// ErrExists is a user name or tailnet login that's already taken
 	ErrExists = errors.New("already exists")
@@ -131,32 +130,67 @@ func migrate(db *sql.DB) error {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) HasUsers() (bool, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT count(*) FROM users`).Scan(&n)
-	return n > 0, err
-}
-
-// CreateFirstAdmin creates an admin with access to every service and returns
-// their key. It fails with ErrNotEmpty once any user exists
-func (s *Store) CreateFirstAdmin(name string) (string, error) {
+// StartSetup creates the "admin" user when there are no users, and returns a
+// new setup key while setup isn't done. It returns "" once setup is done
+func (s *Store) StartSetup() (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
-	var n int
-	if err := tx.QueryRow(`SELECT count(*) FROM users`).Scan(&n); err != nil {
+	var users int
+	var userID string
+	if err := tx.QueryRow(`SELECT count(*) FROM users`).Scan(&users); err != nil {
 		return "", err
 	}
-	if n > 0 {
-		return "", ErrNotEmpty
+	if users == 0 {
+		userID = rand.Text()
+		if _, err := tx.Exec(`INSERT INTO users (id, name, is_admin, has_all_services) VALUES (?, 'admin', 1, 1)`, userID); err != nil {
+			return "", err
+		}
+	} else {
+		err := tx.QueryRow(`DELETE FROM keys WHERE is_setup RETURNING user_id`).Scan(&userID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
 	}
-	id := rand.Text()
-	if _, err := tx.Exec(`INSERT INTO users (id, name, is_admin, has_all_services) VALUES (?, ?, 1, 1)`, id, name); err != nil {
+	key, err := addKey(tx, userID, "", true)
+	if err != nil {
 		return "", err
 	}
-	key, err := addKey(tx, id, "")
+	return key, tx.Commit()
+}
+
+// SetupPending is whether a setup key hasn't been used yet
+func (s *Store) SetupPending() (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM keys WHERE is_setup)`).Scan(&pending)
+	return pending, err
+}
+
+// FinishSetup names the setup key's user and swaps the setup key for a real
+// one, which it returns. It fails with ErrNotFound for anything but a setup key
+func (s *Store) FinishSetup(setupKey, name string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var userID string
+	err = tx.QueryRow(`DELETE FROM keys WHERE hash = ? AND is_setup RETURNING user_id`, hash(setupKey)).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`UPDATE users SET name = ? WHERE id = ?`, name, userID); err != nil {
+		return "", uniqueErr(err)
+	}
+	key, err := addKey(tx, userID, "", false)
 	if err != nil {
 		return "", err
 	}
@@ -173,7 +207,7 @@ func (s *Store) User(id string) (*User, error) { return user(s.db, id) }
 
 func user(q querier, id string) (*User, error) {
 	u := &User{ID: id}
-	err := q.QueryRow(`SELECT name, note, email, is_admin, has_all_services FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllServices)
+	err := q.QueryRow(`SELECT name, note, email, is_admin, is_admin OR has_all_services FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllServices)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -208,7 +242,7 @@ func (s *Store) UserIDByName(name string) (string, error) {
 // KeyUser returns the user a key belongs to, or ErrNotFound
 func (s *Store) KeyUser(key string) (*User, string, error) {
 	var keyID, userID string
-	err := s.db.QueryRow(`SELECT id, user_id FROM keys WHERE hash = ?`, hash(key)).Scan(&keyID, &userID)
+	err := s.db.QueryRow(`SELECT id, user_id FROM keys WHERE hash = ? AND NOT is_setup`, hash(key)).Scan(&keyID, &userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
@@ -347,7 +381,8 @@ func (s *Store) Users() ([]UserDetail, error) {
 }
 
 // SaveUser creates the user when u.ID is "" and updates it otherwise. It
-// returns the user's ID. u.Admin is ignored, only SetAdmin changes it
+// returns the user's ID. u.Admin is ignored, only SetAdmin changes it. Admins
+// reach every service, so their saved AllServices is kept for if they're demoted
 func (s *Store) SaveUser(u User) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -359,7 +394,7 @@ func (s *Store) SaveUser(u User) (string, error) {
 		_, err = tx.Exec(`INSERT INTO users (id, name, note, email, has_all_services) VALUES (?, ?, ?, ?, ?)`, u.ID, u.Name, u.Note, u.Email, u.AllServices)
 	} else {
 		var res sql.Result
-		res, err = tx.Exec(`UPDATE users SET name = ?, note = ?, email = ?, has_all_services = ? WHERE id = ?`, u.Name, u.Note, u.Email, u.AllServices, u.ID)
+		res, err = tx.Exec(`UPDATE users SET name = ?, note = ?, email = ?, has_all_services = CASE WHEN is_admin THEN has_all_services ELSE ? END WHERE id = ?`, u.Name, u.Note, u.Email, u.AllServices, u.ID)
 		if n, _ := rowsAffected(res, err); err == nil && n == 0 {
 			return "", ErrNotFound
 		}
@@ -389,16 +424,20 @@ func (s *Store) DeleteUser(id string) error {
 }
 
 func (s *Store) AddKey(userID, label string) (string, error) {
-	key, err := addKey(s.db, userID, label)
+	key, err := addKey(s.db, userID, label, false)
 	if isConstraint(err, sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY) {
 		return "", ErrNotFound
 	}
 	return key, err
 }
 
-func addKey(q querier, userID, label string) (string, error) {
+func addKey(q querier, userID, label string, setup bool) (string, error) {
+	// setup keys don't start with tg_, so signing in skips them before looking them up
 	key := "tg_" + rand.Text()
-	_, err := q.Exec(`INSERT INTO keys (id, user_id, hash, label, created_at) VALUES (?, ?, ?, ?, ?)`, rand.Text(), userID, hash(key), label, time.Now().Unix())
+	if setup {
+		key = "tgs_" + rand.Text()
+	}
+	_, err := q.Exec(`INSERT INTO keys (id, user_id, hash, label, created_at, is_setup) VALUES (?, ?, ?, ?, ?, ?)`, rand.Text(), userID, hash(key), label, time.Now().Unix(), setup)
 	return key, err
 }
 
@@ -421,7 +460,7 @@ func (s *Store) ResetKeys(userID string) (string, error) {
 	if _, err := tx.Exec(`DELETE FROM keys WHERE user_id = ?`, userID); err != nil {
 		return "", err
 	}
-	key, err := addKey(tx, userID, "")
+	key, err := addKey(tx, userID, "", false)
 	if err != nil {
 		return "", err
 	}

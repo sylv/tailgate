@@ -1,6 +1,6 @@
 # tailgate
 
-tailgate is a reverse proxy hooked into tailscale. Stick `tailgate.name=photos` and `tailgate.port=2283` on a container and its available at `https://photos.your-tailnet.ts.net` over your tailnet by default, or publicly by setting `tailgate.funnel=true` via [tailscale funnel](https://tailscale.com/docs/features/tailscale-funnel)
+tailgate is a reverse proxy hooked into tailscale. Stick `tailgate.id=photos` and `tailgate.port=2283` on a container and its available at `https://photos.your-tailnet.ts.net` over your tailnet by default, or publicly by setting `tailgate.funnel=true` via [tailscale funnel](https://tailscale.com/docs/features/tailscale-funnel)
 
 Funnel users who aren't on your tailnet sign in with a key, or taillscale users accessing tailgate services over your tailnet can login automatically once an admin links their tailscale login to a tailgate user. Rules let you apply redirects, block requests, forward headers upstream, and a lot more. an OIDC provider lets supported apps sign people in with the same auth tailgate uses.
 
@@ -58,7 +58,7 @@ for security, it is *strongly recommended* to use the tailgate docker proxy, whi
 ```yaml
 services:
   tailgate-docker:
-    container_name: tailgate_docker
+    container_name: tailgate-docker
     image: ghcr.io/sylv/tailgate:v1
     command: ["docker-proxy"]
     user: "0"
@@ -75,8 +75,11 @@ services:
     container_name: tailgate
     image: ghcr.io/sylv/tailgate:v1
     restart: unless-stopped
+    depends_on:
+      - tailgate-docker
     environment:
       - TS_AUTHKEY=tskey-auth-...
+      - TZ=Australia/Sydney # optional, for now() in rules and log timestamps. default = UTC
       - DOCKER_HOST=unix:///run/tailgate/docker.sock
     volumes:
       - tailgate-docker:/run/tailgate
@@ -98,6 +101,7 @@ services:
     restart: unless-stopped
     environment:
       - TS_AUTHKEY=tskey-auth-...
+      - TZ=Australia/Sydney # optional, for now() in rules and log timestamps. default = UTC
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.tailgate:/data
@@ -107,7 +111,7 @@ Either way tailgate has to share a network with the containers it proxies to, or
 
 ### 2. first start
 
-tailgate logs a setup link like `https://tailgate.your-tailnet.ts.net/setup?token=...`. open it from a device on your tailnet to create the first user and grab their key. the admin page is at `https://tailgate.your-tailnet.ts.net/admin` and is not accessible outside of the tailnet.
+tailgate logs a setup link like `https://tailgate.your-tailnet.ts.net/setup?key=...`. open it from a device on your tailnet, pick the admin's name and save the key it gives you. until then no services start and funnel stays off, and each restart logs a new setup link. if tailscale names the node `tailgate-1` because the name is taken, tailgate waits and logs what to rename, same as for services. the admin page is at `https://tailgate.your-tailnet.ts.net/admin` and is not accessible outside of the tailnet.
 
 ```sh
 # if you ever lose a key, reset it like this. it revokes all of that user's keys (signing them out everywhere) and prints one new key.
@@ -125,10 +129,12 @@ services:
   immich:
     image: ghcr.io/immich-app/immich-server
     labels:
-       # this is the name of the node that tailgate will create and which will be used as the serve/funnel address
-       # it must not match the name of a node already in your tailnet. if it does, it won't work and will show an error
-       # on the admin page until you rename the hostname. 
-      - tailgate.name=photos # required
+      # what tailgate keeps this service's user access, rules, OIDC clients and node state under. don't change it
+      - tailgate.id=photos # required
+      # the node's name on your tailnet, so its address. change it any time, the node keeps its state and device.
+      # if another device has the name, tailscale calls the node photos-1 and it waits, with an error on the admin page,
+      # until you free the name and rename it back in the tailscale admin console
+      - tailgate.hostname=pics # default = tailgate.id
       # the port tailgate connects to wihin the container
       - tailgate.port=2283 # required
       # whether to make this app publicly accessible. if true, the node will enable tailscale funnel.
@@ -147,6 +153,8 @@ services:
 ```
 
 tailgate connects to the container's IP on `tailgate.network`, then `TAILGATE_NETWORK`, then the container's first network sorted by name, so tailgate has to be on that network too. containers with `network_mode: container:...` or `service:...` are reached through the container they borrow the network from, which can set `tailgate.network` itself, and `network_mode: host` ones through the Docker bridge's gateway
+
+if you delete a service's device in the tailscale admin console or its key expires, the service stops and waits for you to press "Log in again" on the services page, so it doesn't come back on its own. the tailgate node logs back in by itself
 
 ### users and keys
 
@@ -179,10 +187,14 @@ tailgate strips its keys and cookie before the request reaches the app
 
 rules run on every request to a service, top to bottom. Each one has an [expr](https://expr-lang.org/docs/language-definition) condition and effects like `block`, `redirect`, `skip`, and setting or removing request and response headers. rules before the login see every request, and rules after it know who the user is
 
+Over Funnel, rules before the login also run on tailgate's own pages, like the login page, where `service.id` is `""`. On the tailnet they don't, so a bad rule can't lock you out of the admin page. The admin page isn't on Funnel at all
+
+Every service and tailgate itself answer `/.tailgate/trace` with what tailgate sees of your request, like cloudflare's `/cdn-cgi/trace`: your IP, country, ingress, how you're signed in and the request id. It runs before the rules, so it works even when they block you
+
 ```
 before login  ingress == "funnel" && country not in ["AU", "CA"]                                   block
-before login  service.name == "wisp" && path startsWith "/mcp" && !inCidr(ip, "160.79.104.0/21")  block
-after login   service.name == "lyra"                                                                set-request-header X-User = user.name
+before login  service.id == "wisp" && path startsWith "/mcp" && !inCidr(ip, "160.79.104.0/21")  block
+after login   service.id == "lyra"                                                                set-request-header X-User = user.name
 ```
 
 <img src=".github/screenshots/rules.png" alt="The rules page">
@@ -208,11 +220,14 @@ the apps server has to reach the tailgate node to swap codes for tokens, so the 
 
 ### env variables
 
-| Variable            | Default                       |                                                                           |
-| ------------------- | ----------------------------- | ------------------------------------------------------------------------- |
-| `TS_AUTHKEY`        | required                      | A reusable auth key tagged `tag:tailgate`                                 |
-| `TAILGATE_HOSTNAME` | `tailgate`                    | The name of the node with the login page, admin pages and OIDC            |
-| `TAILGATE_DATA_DIR` | `/data`                       | The database, every node's state and the country database                 |
-| `DOCKER_HOST`       | `unix:///var/run/docker.sock` | Where Docker is, as `unix://` or `tcp://`                                 |
-| `TAILGATE_NETWORK`  |                               | The network to reach containers on when they don't set `tailgate.network` |
-| `TZ`                | `UTC`                         | The time zone for `now()` in rules                                        |
+| Variable             | Default                       |                                                                                |
+| -------------------- | ----------------------------- | ------------------------------------------------------------------------------ |
+| `TS_AUTHKEY`         | required                      | A reusable auth key tagged `tag:tailgate`                                      |
+| `TAILGATE_HOSTNAME`  | `tailgate`                    | The name of the node with the login page, admin pages and OIDC                 |
+| `TAILGATE_DATA_DIR`  | `/data`                       | The database, every node's state and the country database                      |
+| `DOCKER_HOST`        | `unix:///var/run/docker.sock` | Where Docker is, as `unix://` or `tcp://`                                      |
+| `TAILGATE_NETWORK`   |                               | The network to reach containers on when they don't set `tailgate.network`      |
+| `TZ`                 | `UTC`                         | The time zone for `now()` in rules and log timestamps                          |
+| `TAILGATE_LOG_JSON`  | `false`                       | Log JSON instead of coloured text                                              |
+| `TAILGATE_LOG_LEVEL` | `info`                        | `debug` also shows tailscale's own logs for each node, for connection problems |
+| `NO_COLOR`           |                               | Set to anything to log text without colour                                     |

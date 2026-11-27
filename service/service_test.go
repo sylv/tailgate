@@ -18,13 +18,13 @@ func one(t *testing.T, labels map[string]string) Service {
 
 func TestValid(t *testing.T) {
 	s := one(t, map[string]string{
-		"tailgate.name":                     "photos",
+		"tailgate.id":                       "photos",
 		"tailgate.port":                     "2283",
 		"tailgate.funnel":                   "true",
 		"tailgate.dangerously-disable-auth": "false",
 		"traefik.enable":                    "true",
 	})
-	want := Service{Container: "c1", Name: "photos", Port: 2283, Funnel: true, Noindex: true}
+	want := Service{Container: "c1", ID: "photos", Hostname: "photos", Port: 2283, Funnel: true, Noindex: true}
 	if s != want {
 		t.Fatalf("got %+v, want %+v", s, want)
 	}
@@ -32,7 +32,7 @@ func TestValid(t *testing.T) {
 
 func TestSpellings(t *testing.T) {
 	for _, key := range []string{"tailgate.dangerously-disable-auth", "tailgate.dangerouslyDisableAuth", "tailgate.dangerously_disable_auth"} {
-		s := one(t, map[string]string{"tailgate.name": "plex", "tailgate.port": "32400", key: "true"})
+		s := one(t, map[string]string{"tailgate.id": "plex", "tailgate.port": "32400", key: "true"})
 		if s.Err != nil || !s.DangerouslyDisableAuth {
 			t.Errorf("%s: got %+v", key, s)
 		}
@@ -40,11 +40,11 @@ func TestSpellings(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
-	s := one(t, map[string]string{"tailgate.name": "photos", "tailgate.port": "2283"})
+	s := one(t, map[string]string{"tailgate.id": "photos", "tailgate.port": "2283"})
 	if s.Err != nil || s.Funnel || s.DangerouslyDisableAuth || !s.Noindex {
 		t.Fatalf("got %+v", s)
 	}
-	if s := one(t, map[string]string{"tailgate.name": "blog", "tailgate.port": "80", "tailgate.noindex": "false"}); s.Err != nil || s.Noindex {
+	if s := one(t, map[string]string{"tailgate.id": "blog", "tailgate.port": "80", "tailgate.noindex": "false"}); s.Err != nil || s.Noindex {
 		t.Fatalf("noindex=false got %+v", s)
 	}
 }
@@ -57,7 +57,7 @@ func TestNoLabels(t *testing.T) {
 }
 
 func TestErrors(t *testing.T) {
-	base := map[string]string{"tailgate.name": "photos", "tailgate.port": "2283"}
+	base := map[string]string{"tailgate.id": "photos", "tailgate.port": "2283"}
 	with := func(kv ...string) map[string]string {
 		m := map[string]string{}
 		for k, v := range base {
@@ -82,11 +82,11 @@ func TestErrors(t *testing.T) {
 		"funnel typo":         {with("tailgate.funnel", "yes"), "must be true or false"},
 		"funnel capital":      {with("tailgate.funnel", "True"), "must be true or false"},
 		"auth typo":           {with("tailgate.dangerously-disable-auth", "1"), "must be true or false"},
-		"missing name":        {with("tailgate.name", "<unset>"), "tailgate.name is required"},
-		"empty name":          {with("tailgate.name", ""), "tailgate.name is required"},
-		"path in name":        {with("tailgate.name", "../etc"), "lowercase letters"},
-		"uppercase name":      {with("tailgate.name", "Photos"), "lowercase letters"},
-		"dotted name":         {with("tailgate.name", "photos.example"), "lowercase letters"},
+		"missing name":        {with("tailgate.id", "<unset>"), "tailgate.id is required"},
+		"empty name":          {with("tailgate.id", ""), "tailgate.id is required"},
+		"path in name":        {with("tailgate.id", "../etc"), "lowercase letters"},
+		"uppercase name":      {with("tailgate.id", "Photos"), "lowercase letters"},
+		"dotted name":         {with("tailgate.id", "photos.example"), "lowercase letters"},
 		"missing port":        {with("tailgate.port", "<unset>"), "tailgate.port is required"},
 		"port not a number":   {with("tailgate.port", "http"), "from 1 to 65535"},
 		"port zero":           {with("tailgate.port", "0"), "from 1 to 65535"},
@@ -106,15 +106,17 @@ func TestErrors(t *testing.T) {
 
 func TestDuplicateNames(t *testing.T) {
 	got := FromContainers([]docker.Container{
-		{Name: "c1", Labels: map[string]string{"tailgate.name": "photos", "tailgate.port": "2283"}},
-		{Name: "c2", Labels: map[string]string{"tailgate.name": "photos", "tailgate.port": "80"}},
-		{Name: "c3", Labels: map[string]string{"tailgate.name": "plex", "tailgate.port": "32400"}},
+		{Name: "c1", Labels: map[string]string{"tailgate.id": "photos", "tailgate.port": "2283"}},
+		{Name: "c2", Labels: map[string]string{"tailgate.id": "photos", "tailgate.port": "80"}},
+		{Name: "c3", Labels: map[string]string{"tailgate.id": "plex", "tailgate.port": "32400"}},
+		{Name: "c4", Labels: map[string]string{"tailgate.id": "plex-old", "tailgate.hostname": "plex", "tailgate.port": "32400"}},
+		{Name: "c5", Labels: map[string]string{"tailgate.id": "blog-v2", "tailgate.hostname": "blog", "tailgate.port": "80"}},
 	}, "")
-	if len(got) != 3 {
+	if len(got) != 5 {
 		t.Fatalf("got %+v", got)
 	}
 	for _, s := range got {
-		if (s.Name == "photos") != (s.Err != nil) {
+		if (s.ID == "blog-v2") != (s.Err == nil) {
 			t.Errorf("got %+v", s)
 		}
 	}
@@ -122,7 +124,7 @@ func TestDuplicateNames(t *testing.T) {
 
 func TestNetwork(t *testing.T) {
 	labels := func(kv ...string) map[string]string {
-		m := map[string]string{"tailgate.name": "photos", "tailgate.port": "2283"}
+		m := map[string]string{"tailgate.id": "photos", "tailgate.port": "2283"}
 		for i := 0; i < len(kv); i += 2 {
 			m[kv[i]] = kv[i+1]
 		}

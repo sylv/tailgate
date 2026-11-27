@@ -10,7 +10,7 @@ export interface AdminData {
   services: Services | undefined;
   reloadServices: () => void;
   /** services that are routed now, for pickers */
-  serviceNames: string[];
+  serviceIDs: string[];
 }
 
 export const AdminContext = createContext<AdminData | null>(null);

@@ -71,12 +71,12 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request) {
 	c, err := g.db.OIDCClient(q.Get("client_id"))
 	if errors.Is(err, store.ErrNotFound) || err == nil && !slices.Contains(c.RedirectURIs, redirectURI) {
 		// never redirect to a uri that isn't the client's own
-		plain(w, r, http.StatusBadRequest, "This app's sign in link doesn't match an OIDC client in tailgate. Check its client ID and redirect URI")
+		plain(w, r, http.StatusBadRequest, "unknown oidc client or redirect uri")
 		return
 	}
 	if err != nil {
 		slog.Error("reading the oidc client failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "Signing in failed")
+		plain(w, r, http.StatusInternalServerError, "sign in failed")
 		return
 	}
 	back := func(v url.Values) {
@@ -104,7 +104,7 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request) {
 	id, err := g.identify(w, r, "")
 	if err != nil {
 		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "Signing in failed")
+		plain(w, r, http.StatusInternalServerError, "sign in failed")
 		return
 	}
 	if id == nil || !canSignIn(id.user, c) {

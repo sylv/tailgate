@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
+	"github.com/sylv/tailgate/service"
 	"github.com/sylv/tailgate/store"
 )
 
@@ -43,7 +43,13 @@ func (g *gate) web(funnel bool) http.Handler {
 	mux.HandleFunc("POST /api/login", g.api(false, g.signIn))
 	mux.HandleFunc("POST /api/logout", g.api(false, g.signOut))
 	g.oidc(mux)
-	if !funnel {
+	if funnel {
+		for _, path := range []string{"/setup", "/admin", "/admin/"} {
+			mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+				plain(w, r, http.StatusNotFound, "this page is only available on the tailnet")
+			})
+		}
+	} else {
 		g.tailnetOnly(mux)
 	}
 
@@ -56,8 +62,46 @@ func (g *gate) web(funnel bool) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Robots-Tag", noindex)
+		if (funnel || r.URL.Path == tracePath) && !g.selfRules(w, r) {
+			return
+		}
 		h.ServeHTTP(w, r)
 	}))
+}
+
+// selfRules answers the trace and, over funnel, runs the pre-auth rules on
+// tailgate's own pages like a service. the tailnet skips them so a bad rule
+// can't lock admins out of the page that fixes it. It's false once the request
+// is answered
+func (g *gate) selfRules(w http.ResponseWriter, r *http.Request) bool {
+	id, err := g.identify(w, r, "")
+	if err != nil {
+		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
+		plain(w, r, http.StatusInternalServerError, "sign in failed")
+		return false
+	}
+	hostname, _, _ := strings.Cut(g.hosts(""), ".")
+	req, err := g.ruleRequest(r, service.Service{Hostname: hostname, Funnel: true, Noindex: true})
+	if err != nil {
+		slog.Error("reading the request for rules failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
+		plain(w, r, http.StatusInternalServerError, "internal server error")
+		return false
+	}
+	if r.URL.Path == tracePath {
+		trace(w, r, req, id)
+		return false
+	}
+	set, err := g.ruleSet()
+	if err != nil {
+		plain(w, r, http.StatusServiceUnavailable, "service unavailable")
+		return false
+	}
+	res := requestOf(r.Context()).rules
+	if ended(w, r, set.Run(rules.Pre, req, rules.User{SignedIn: id != nil}, res), res) {
+		return false
+	}
+	res.ApplyResponse(w.Header())
+	return true
 }
 
 func (g *gate) tailnetOnly(mux *http.ServeMux) {
@@ -85,6 +129,9 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/logins", g.api(true, g.tailnetLogins))
 	mux.HandleFunc("GET /api/admin/services", g.api(true, g.adminServices))
 	mux.HandleFunc("POST /api/admin/remove-unused-nodes", g.api(true, g.removeUnused))
+	mux.HandleFunc("POST /api/admin/services/{name}/login", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
+		return nil, g.nodes.Login(r.Context(), r.PathValue("name"))
+	}))
 	mux.HandleFunc("GET /api/admin/rules", g.api(true, g.listRules))
 	mux.HandleFunc("PUT /api/admin/rules", g.api(true, g.saveRules))
 	mux.HandleFunc("POST /api/admin/rules/check", g.api(true, checkRule))
@@ -100,7 +147,7 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 func (g *gate) page(w http.ResponseWriter, r *http.Request) {
 	index := uiAssets()["/index.html"]
 	if index == nil {
-		plain(w, r, http.StatusServiceUnavailable, "The UI wasn't built into this binary")
+		plain(w, r, http.StatusServiceUnavailable, "ui was not built into this binary")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -113,7 +160,7 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 	id, err := g.identify(w, r, "")
 	if err != nil {
 		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "Signing in failed")
+		plain(w, r, http.StatusInternalServerError, "sign in failed")
 		return
 	}
 	to := r.URL.Query().Get("to")
@@ -138,16 +185,12 @@ type target struct {
 // service's own host so it can't point anywhere else
 func (g *gate) target(to string) (target, error) {
 	name, path, _ := strings.Cut(to, ":")
-	if _, ok := g.route(name); !ok {
-		return target{}, errors.New("There's no service called " + name)
-	}
-	// a path starting with // or /\ is another host to a browser
-	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
-		return target{}, errors.New("The link you followed is broken")
-	}
+	_, ok := g.route(name)
 	host := g.hosts(name)
-	if host == "" {
-		return target{}, errors.New(name + " isn't online yet")
+	// a path starting with // or /\ is another host to a browser. one error for
+	// everything, so funnel visitors can't use it to find out which services exist
+	if !ok || host == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
+		return target{}, errors.New("The link you followed is broken")
 	}
 	return target{service: name, host: host, path: path}, nil
 }
@@ -226,7 +269,10 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		Services []link      `json:"services"`
 		Target   string      `json:"target,omitempty"`
 		Error    string      `json:"error,omitempty"`
-	}{Services: []link{}}
+		// Ingress and RequestID are for the page footer, so a visitor can say how they came and which request it was
+		Ingress   string `json:"ingress"`
+		RequestID string `json:"requestId"`
+	}{Services: []link{}, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
 	// client is the oidc client the login page is signing in to
 	var client *store.OIDCClient
 	if clientID := r.URL.Query().Get("client"); clientID != "" {
@@ -234,11 +280,11 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		if client, err = g.db.OIDCClient(clientID); err != nil {
 			return nil, err
 		}
-		res.Target = client.Service
+		res.Target = g.hostname(client.Service)
 	}
 	if to := r.URL.Query().Get("to"); to != "" {
 		t, err := g.target(to)
-		res.Target = t.service
+		res.Target = g.hostname(t.service)
 		if err != nil {
 			res.Error = err.Error()
 		}
@@ -248,12 +294,12 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 	}
 	res.User, res.Via, res.Login = id.user, id.via, id.login
 	if client != nil && id.user.HasAccess(client.Service) && id.user.Email == "" {
-		res.Error = id.user.Name + " has no email, which signing in to " + client.Service + " needs. Ask an admin to add one"
+		res.Error = id.user.Name + " has no email, which signing in to " + g.hostname(client.Service) + " needs. Ask an admin to add one"
 	}
 	for _, s := range g.routed() {
-		if id.user.HasAccess(s.Name) {
-			l := link{Name: s.Name}
-			if host := g.hosts(s.Name); host != "" {
+		if id.user.HasAccess(s.ID) {
+			l := link{Name: s.Hostname}
+			if host := g.hosts(s.ID); host != "" {
 				l.URL = "https://" + host
 			}
 			res.Services = append(res.Services, l)
@@ -298,26 +344,23 @@ func (g *gate) signOut(w http.ResponseWriter, r *http.Request, id *identity) (an
 }
 
 func (g *gate) setup(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
-	var body struct{ Token, Name string }
+	var body struct{ Key, Name string }
 	if err := decode(r, &body); err != nil {
 		return nil, err
-	}
-	gone := &apiError{http.StatusNotFound, "This setup link has expired or was already used"}
-	if subtle.ConstantTimeCompare([]byte(body.Token), []byte(g.setupToken)) != 1 {
-		return nil, gone
 	}
 	name, err := userName(body.Name)
 	if err != nil {
 		return nil, err
 	}
-	key, err := g.db.CreateFirstAdmin(name)
-	if errors.Is(err, store.ErrNotEmpty) {
-		return nil, gone
+	key, err := g.db.FinishSetup(body.Key, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, &apiError{http.StatusNotFound, "This setup link has expired or was already used"}
 	}
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("created the first admin", "user", name)
+	slog.Info("setup is done, starting services", "admin", name)
+	g.refresh()
 	return map[string]string{"key": key}, nil
 }
 
@@ -409,10 +452,13 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		URL         string `json:"url,omitempty"`
 		SignCommand string `json:"signCommand,omitempty"`
 		NodeError   string `json:"nodeError,omitempty"`
+		// RetryAt is when a cert is tried again, in unix seconds
+		RetryAt int64 `json:"retryAt,omitempty"`
 	}
 	type svc struct {
 		nodeInfo
-		Name                   string `json:"name"`
+		ID                     string `json:"id"`
+		Hostname               string `json:"hostname"`
 		Container              string `json:"container"`
 		Port                   int    `json:"port"`
 		Funnel                 bool   `json:"funnel"`
@@ -428,6 +474,9 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		}
 		if st.Err != nil {
 			n.NodeError = st.Err.Error()
+		}
+		if !st.RetryAt.IsZero() {
+			n.RetryAt = st.RetryAt.Unix()
 		}
 		return n
 	}
@@ -450,13 +499,13 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		res.Problems = append(res.Problems, "Docker can't be read, so changes to containers aren't picked up: "+dockerErr.Error())
 	}
 	for _, s := range services {
-		v := svc{Name: s.Name, Container: s.Container, Port: s.Port, Funnel: s.Funnel, DangerouslyDisableAuth: s.DangerouslyDisableAuth}
+		v := svc{ID: s.ID, Hostname: s.Hostname, Container: s.Container, Port: s.Port, Funnel: s.Funnel, DangerouslyDisableAuth: s.DangerouslyDisableAuth}
 		if s.Addr != "" {
 			v.Upstream = "http://" + net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))
 		}
 		if s.Err != nil {
 			v.Error = s.Err.Error()
-		} else if st, ok := g.nodeStatus(s.Name); ok {
+		} else if st, ok := g.nodeStatus(s.ID); ok {
 			v.nodeInfo = nodeOf(st)
 		}
 		res.Services = append(res.Services, v)
@@ -542,11 +591,11 @@ func checkRule(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error)
 }
 
 func (g *gate) ruleSchema(http.ResponseWriter, *http.Request, *identity) (any, error) {
-	services := []string{}
+	ids, hostnames := []string{}, []string{}
 	for _, s := range g.routed() {
-		services = append(services, s.Name)
+		ids, hostnames = append(ids, s.ID), append(hostnames, s.Hostname)
 	}
-	return map[string]any{"values": rules.Schema(), "services": services}, nil
+	return map[string]any{"values": rules.Schema(), "services": ids, "hostnames": hostnames}, nil
 }
 
 func (g *gate) oidcClients(http.ResponseWriter, *http.Request, *identity) (any, error) {

@@ -1,4 +1,4 @@
-import { ExclamationMarkIcon, PauseIcon } from "@phosphor-icons/react";
+import { ExclamationMarkIcon, HourglassSimpleIcon, PauseIcon } from "@phosphor-icons/react";
 import type { FC } from "react";
 import type { NodeInfo, Service, Services } from "../../api";
 import { cn } from "../../lib/utils";
@@ -8,7 +8,7 @@ export type Tone = "ok" | "idle" | "warning" | "danger" | "unused";
 
 export interface Status {
   tone: Tone;
-  icon: "none" | "pause" | "alert";
+  icon: "none" | "pause" | "wait" | "alert";
   label: string;
 }
 
@@ -17,12 +17,16 @@ const toneOf = (n: NodeInfo): Tone => {
     case "online":
       return "ok";
     case "needs signing":
+    case "needs approval":
+    case "logged out":
     case "funnel not allowed":
     case "wrong name":
       return "warning";
     case "failed":
     case "auth key invalid":
       return "danger";
+    case "cert pending":
+      return n.nodeError ? "warning" : "idle";
   }
   // starting and cert pending are on their way
   return n.nodeError ? "danger" : "idle";
@@ -34,7 +38,7 @@ export const nodeStatus = (n: NodeInfo): Status => {
   const tone = toneOf(n);
   return {
     tone,
-    icon: tone === "warning" || tone === "danger" ? "alert" : "none",
+    icon: tone === "warning" || tone === "danger" ? "alert" : tone === "idle" && n.state ? "wait" : "none",
     label: sentence(n.state || "no node"),
   };
 };
@@ -62,7 +66,7 @@ export const toneText: Record<Tone, string> = {
 };
 
 /** a ring in the status's colour, empty when it's fine, a pause when the container is
- * stopped, a ! when something needs doing */
+ * stopped, an hourglass while the node is on its way, a ! when something needs doing */
 export const StatusRing: FC<{ status: Status }> = ({ status }) => (
   <Tooltip label={status.label}>
     <span
@@ -74,6 +78,7 @@ export const StatusRing: FC<{ status: Status }> = ({ status }) => (
       )}
     >
       {status.icon === "pause" && <PauseIcon weight="fill" className="size-2.5" />}
+      {status.icon === "wait" && <HourglassSimpleIcon weight="fill" className="size-2.5" />}
       {status.icon === "alert" && <ExclamationMarkIcon weight="bold" className="size-3" />}
     </span>
   </Tooltip>

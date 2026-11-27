@@ -15,3 +15,10 @@ export const ago = (seconds: number) => {
   for (const [unit, size] of units) if (d >= size) return fmt.format(-Math.floor(d / size), unit);
   return "just now";
 };
+
+/** "in 40 minutes" from unix seconds, "soon" under a minute */
+export const until = (seconds: number) => {
+  const d = seconds - Date.now() / 1000;
+  for (const [unit, size] of units) if (d >= size) return fmt.format(Math.floor(d / size), unit);
+  return "soon";
+};

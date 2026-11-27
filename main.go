@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"crypto/rand"
 	"crypto/rsa"
 	"errors"
 	"fmt"
@@ -15,10 +14,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
 	"github.com/sylv/tailgate/docker"
 	"github.com/sylv/tailgate/geo"
 	"github.com/sylv/tailgate/node"
@@ -31,7 +32,16 @@ import (
 var version = "dev"
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(cmp.Or(os.Getenv("TAILGATE_LOG_LEVEL"), "info"))); err != nil {
+		fmt.Fprintln(os.Stderr, "TAILGATE_LOG_LEVEL must be debug, info, warn or error")
+		os.Exit(2)
+	}
+	var h slog.Handler = tint.NewHandler(os.Stdout, &tint.Options{Level: level, TimeFormat: time.DateTime, NoColor: os.Getenv("NO_COLOR") != ""})
+	if json, _ := strconv.ParseBool(os.Getenv("TAILGATE_LOG_JSON")); json {
+		h = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	}
+	slog.SetDefault(slog.New(h))
 	args := os.Args[1:]
 	var err error
 	switch {
@@ -124,18 +134,20 @@ func run() error {
 	g.peers = func(ctx context.Context) ([]node.Peer, error) { return nodes.Self().Peers(ctx) }
 	self := nodes.StartSelf(hostname, g.web(false), g.web(true))
 	select {
-	case <-self.Registered():
+	case <-self.Ready():
 	case <-self.Done():
 		return fmt.Errorf("the tailgate node couldn't start: %w", self.Status().Err)
 	case <-ctx.Done():
 		return nil
 	}
-	has, err := db.HasUsers()
+	setupKey, err := db.StartSetup()
 	if err != nil {
 		return err
 	}
-	if !has {
-		slog.Info("open the setup link to create the first admin", "url", "https://"+g.hosts("")+"/setup?token="+g.setupToken)
+	if setupKey == "" {
+		slog.Info("tailgate is ready", "admin", "https://"+g.hosts("")+"/admin")
+	} else {
+		slog.Warn("setup isn't done, so services and funnel stay off until you open the setup link", "url", "https://"+g.hosts("")+"/setup?key="+setupKey)
 	}
 
 	changed := make(chan struct{}, 1)
@@ -185,14 +197,13 @@ func run() error {
 }
 
 type gate struct {
-	db         *store.Store
-	nodes      *node.Manager
-	setupToken string
-	codes      tokens[code]
-	oidcCodes  tokens[oidcCode]
-	access     tokens[accessToken]
-	transport  *http.Transport
-	rp         *httputil.ReverseProxy
+	db        *store.Store
+	nodes     *node.Manager
+	codes     tokens[code]
+	oidcCodes tokens[oidcCode]
+	access    tokens[accessToken]
+	transport *http.Transport
+	rp        *httputil.ReverseProxy
 	// hosts gives a service node's DNS name, or the tailgate node's for "", and "" until it has joined
 	hosts func(name string) string
 	peer  func(context.Context) (*node.Peer, error)
@@ -215,7 +226,7 @@ type gate struct {
 }
 
 func newGate(db *store.Store, nodes *node.Manager) *gate {
-	g := &gate{db: db, nodes: nodes, setupToken: rand.Text(), peer: node.PeerOf, refresh: func() {}, routes: map[string]service.Service{}}
+	g := &gate{db: db, nodes: nodes, peer: node.PeerOf, refresh: func() {}, routes: map[string]service.Service{}}
 	g.transport, g.rp = newProxy()
 	g.loadRules()
 	return g
@@ -247,17 +258,25 @@ func (g *gate) ruleSet() (*rules.Set, error) {
 }
 
 // route returns a service that's routed, which means its labels are valid
-func (g *gate) route(name string) (service.Service, bool) {
+func (g *gate) route(id string) (service.Service, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	s, ok := g.routes[name]
+	s, ok := g.routes[id]
 	return s, ok
+}
+
+// hostname is what people see a service called, its id while it isn't routed
+func (g *gate) hostname(id string) string {
+	if s, ok := g.route(id); ok {
+		return s.Hostname
+	}
+	return id
 }
 
 func (g *gate) routed() []service.Service {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return slices.SortedFunc(maps.Values(g.routes), func(a, b service.Service) int { return cmp.Compare(a.Name, b.Name) })
+	return slices.SortedFunc(maps.Values(g.routes), func(a, b service.Service) int { return cmp.Compare(a.ID, b.ID) })
 }
 
 func (g *gate) snapshot() ([]service.Service, []string, error) {
@@ -272,8 +291,8 @@ func (g *gate) inUse() map[string]bool {
 	defer g.mu.RUnlock()
 	names := map[string]bool{}
 	for _, s := range g.services {
-		if s.Name != "" {
-			names[s.Name] = true
+		if s.ID != "" {
+			names[s.ID] = true
 		}
 	}
 	return names
@@ -298,22 +317,29 @@ func (g *gate) reconcile(services []service.Service) {
 	}
 	public := map[string]bool{}
 	for _, s := range g.routes {
-		public[s.Name] = s.Funnel && s.DangerouslyDisableAuth
+		public[s.ID] = s.Funnel && s.DangerouslyDisableAuth
 	}
 	g.mu.RUnlock()
+	pending, err := g.db.SetupPending()
+	if err != nil {
+		slog.Error("checking setup failed, so nothing is routed", "error", err.Error())
+	}
 	funnel := false
 	for _, s := range services {
 		if s.Err != nil {
 			if old[s.Container] != s.Err.Error() {
-				slog.Error("service has errors and isn't routed", "container", s.Container, "service", s.Name, "error", s.Err.Error())
+				slog.Error("service has errors and isn't routed", "container", s.Container, "service", s.ID, "error", s.Err.Error())
 			}
 			continue
 		}
-		if s.Funnel && s.DangerouslyDisableAuth && !public[s.Name] {
-			slog.Warn("service is on funnel with auth disabled, so anyone on the internet can use it", "service", s.Name)
+		if s.Funnel && s.DangerouslyDisableAuth && !public[s.ID] {
+			slog.Warn("service is on funnel with auth disabled, so anyone on the internet can use it", "service", s.ID)
+		}
+		if pending || err != nil {
+			continue
 		}
 		funnel = funnel || s.Funnel
-		routes[s.Name] = s
+		routes[s.ID] = s
 	}
 
 	g.mu.Lock()
@@ -335,7 +361,7 @@ func (g *gate) reconcile(services []service.Service) {
 		}
 	}
 	for name, s := range routes {
-		g.nodes.Start(name, g.serviceHandler(name), s.Funnel)
+		g.nodes.Start(name, s.Hostname, g.serviceHandler(name), s.Funnel)
 	}
 	// funnel visitors have to reach the login page
 	g.nodes.Self().SetFunnel(funnel)

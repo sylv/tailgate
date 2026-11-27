@@ -53,7 +53,7 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Warn("upstream request failed", "request_id", requestOf(r.Context()).id, "host", r.Host, "error", err.Error())
-			plain(w, r, http.StatusBadGateway, "The app behind this address isn't responding")
+			plain(w, r, http.StatusBadGateway, "upstream service is offline")
 		},
 	}
 }
@@ -64,26 +64,30 @@ func (g *gate) serviceHandler(name string) http.Handler {
 	return requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s, ok := g.route(name)
 		if !ok {
-			plain(w, r, http.StatusBadGateway, "This service isn't set up")
+			plain(w, r, http.StatusBadGateway, "service unavailable")
 			return
 		}
 		set, err := g.ruleSet()
 		if err != nil {
-			plain(w, r, http.StatusServiceUnavailable, "The rules couldn't be loaded, so every request is blocked")
+			plain(w, r, http.StatusServiceUnavailable, "service unavailable")
 			return
 		}
 		var id *identity
 		if !s.DangerouslyDisableAuth {
 			if id, err = g.identify(w, r, name); err != nil {
 				slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-				plain(w, r, http.StatusInternalServerError, "Signing in failed")
+				plain(w, r, http.StatusInternalServerError, "sign in failed")
 				return
 			}
 		}
 		req, err := g.ruleRequest(r, s)
 		if err != nil {
 			slog.Error("reading the request for rules failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-			plain(w, r, http.StatusInternalServerError, "This request couldn't be checked")
+			plain(w, r, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if r.URL.Path == tracePath {
+			trace(w, r, req, id)
 			return
 		}
 		user := rules.User{}
@@ -113,14 +117,14 @@ func (g *gate) authorized(w http.ResponseWriter, r *http.Request, name string, i
 	}
 	if id == nil {
 		if !navigation(r) {
-			plain(w, r, http.StatusUnauthorized, "Sign in to use this service")
+			plain(w, r, http.StatusUnauthorized, "sign in required")
 			return false
 		}
 		redirect(w, "https://"+g.hosts("")+"/login?"+url.Values{"to": {name + ":" + r.URL.RequestURI()}}.Encode())
 		return false
 	}
 	if !id.user.HasAccess(name) {
-		plain(w, r, http.StatusForbidden, "You're signed in as "+id.user.Name+", who doesn't have access to "+name)
+		plain(w, r, http.StatusForbidden, "you do not have access to this service")
 		return false
 	}
 	return true
@@ -132,7 +136,7 @@ func ended(w http.ResponseWriter, r *http.Request, err error, res *rules.Result)
 	req := requestOf(r.Context())
 	if err != nil {
 		req.ruleErr = err.Error()
-		plain(w, r, http.StatusForbidden, "A rule failed, so this request was blocked")
+		plain(w, r, http.StatusForbidden, "your request was blocked")
 		return true
 	}
 	if res.End == nil {
@@ -140,7 +144,7 @@ func ended(w http.ResponseWriter, r *http.Request, err error, res *rules.Result)
 	}
 	req.rule = res.End.Rule
 	if res.End.URL == "" {
-		plain(w, r, http.StatusForbidden, cmp.Or(res.End.Message, "This request was blocked"))
+		plain(w, r, http.StatusForbidden, cmp.Or(res.End.Message, "your request was blocked"))
 		return true
 	}
 	w.Header().Set("Location", res.End.URL)
@@ -191,7 +195,7 @@ func (g *gate) ruleRequest(r *http.Request, s service.Service) (rules.Request, e
 
 func (g *gate) proxy(w http.ResponseWriter, r *http.Request, s service.Service) {
 	if s.Addr == "" {
-		plain(w, r, http.StatusBadGateway, "The app behind this address isn't running")
+		plain(w, r, http.StatusBadGateway, "upstream service is offline")
 		return
 	}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceKey{}, s)))
@@ -206,7 +210,7 @@ func (g *gate) callback(w http.ResponseWriter, r *http.Request, name string) {
 	token, err := g.db.CreateSession(c.userID, c.keyID, name, c.parent)
 	if err != nil {
 		slog.Error("creating a session failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "Signing in failed")
+		plain(w, r, http.StatusInternalServerError, "sign in failed")
 		return
 	}
 	setCookie(w, token)

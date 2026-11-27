@@ -5,6 +5,7 @@ import { Confirm } from "../components/confirm";
 import { Empty, List } from "../components/section";
 import { Note } from "../components/note";
 import { nodeStatus, serviceStatus, StatusRing, type Status } from "../components/services/status";
+import { until } from "../lib/time";
 import { cn } from "../lib/utils";
 import { Button } from "../ui/button";
 import { CopyField } from "../ui/copy-field";
@@ -93,6 +94,7 @@ export function ServicesRoute() {
 
 function ServiceRow({ service: s }: { service: Service }) {
   const details = [
+    s.id && s.hostname !== s.id && `id ${s.id}`,
     `container ${s.container}${s.upstream ? `, ${s.upstream}` : s.error ? "" : ", not running"}`,
     !s.error &&
       s.funnel &&
@@ -101,7 +103,7 @@ function ServiceRow({ service: s }: { service: Service }) {
   ];
   return (
     <Row
-      name={s.name || s.container}
+      name={s.hostname || s.id || s.container}
       url={s.url}
       details={details}
       reach={s.error ? undefined : s.funnel ? "Funnel" : "Tailnet"}
@@ -113,7 +115,7 @@ function ServiceRow({ service: s }: { service: Service }) {
           <span className="whitespace-pre-wrap">{s.error}</span>
         </Note>
       )}
-      <NodeNotes node={s} />
+      <NodeNotes node={s} id={s.id} />
     </Row>
   );
 }
@@ -170,20 +172,58 @@ function Row({
   );
 }
 
-function NodeNotes({ node }: { node: NodeInfo }) {
+// id is the service's, the tailgate node has none and logs back in by itself
+function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
+  const { reloadServices } = useAdmin();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   return (
     <>
-      {node.state === "needs signing" ? (
+      {node.state === "logged out" && id ? (
+        <Note tone="warning">
+          <span className="block">{node.nodeError}</span>
+          <span className="mt-2 flex items-center gap-3">
+            <Button
+              size="sm"
+              loading={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError("");
+                try {
+                  await api("POST", `/api/admin/services/${encodeURIComponent(id)}/login`);
+                  reloadServices();
+                } catch (err) {
+                  setError((err as Error).message);
+                }
+                setBusy(false);
+              }}
+            >
+              Log in again
+            </Button>
+            {error && <span className="text-danger">{error}</span>}
+          </span>
+        </Note>
+      ) : node.state === "needs signing" ? (
         <Note tone="warning">
           This node needs signing before it can serve requests. Run the command below on a signing node.{" "}
           <ExternalLink href="https://tailscale.com/kb/1226/tailnet-lock">Tailnet lock docs</ExternalLink>
         </Note>
-      ) : node.state === "funnel not allowed" || node.state === "wrong name" ? (
+      ) : node.state === "funnel not allowed" ||
+        node.state === "wrong name" ||
+        node.state === "needs approval" ? (
         <Note tone="warning">
           {node.nodeError || "Funnel isn't allowed for this node, so it's only on the tailnet"}
         </Note>
       ) : (
-        node.nodeError && <Note tone="danger">{node.nodeError}</Note>
+        node.nodeError && (
+          <Note tone={node.state === "cert pending" ? "warning" : "danger"}>
+            <span className="block">{node.nodeError}</span>
+            {node.retryAt && <span className="mt-1 block">Trying again {until(node.retryAt)}</span>}
+          </Note>
+        )
+      )}
+      {node.state === "cert pending" && !node.nodeError && (
+        <Note tone="info">Getting a certificate from Let's Encrypt, this usually takes under a minute</Note>
       )}
       {node.state === "needs signing" && node.signCommand && (
         <CopyField value={node.signCommand} label="command" />

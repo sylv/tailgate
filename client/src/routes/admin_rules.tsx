@@ -145,6 +145,10 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
           </>
         }
       />
+      <Note tone="info" className="mb-8">
+        Over Funnel, rules before sign-in also run on tailgate's own pages, where service.id is "". On the
+        tailnet they don't, so a bad rule can't lock you out of this page
+      </Note>
       {saved.error && (
         <Note tone="danger" className="mb-8">
           The saved rules can't be loaded, so every request to a service is blocked until they're fixed.{" "}
@@ -164,7 +168,7 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
         <LockedRule
           name="Access"
           condition="!service.dangerouslyDisableAuth && !user.hasAccess"
-          effect={`block "You're signed in as " + user.name + ", who doesn't have access to " + service.name`}
+          effect={`block "you do not have access to this service"`}
           values={values}
         />
         <Stage title="Signed in" className="mt-8" />

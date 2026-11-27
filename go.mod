@@ -6,6 +6,7 @@ require (
 	github.com/andybalholm/brotli v1.3.0
 	github.com/expr-lang/expr v1.18.1
 	github.com/klauspost/compress v1.20.2
+	github.com/lmittmann/tint v1.2.1
 	github.com/oschwald/maxminddb-golang/v2 v2.9.1
 	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.63.0

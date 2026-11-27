@@ -26,7 +26,7 @@ export function LoginRoute() {
 
   if (me.error) {
     return (
-      <NarrowPage title="Can't sign in" description={me.error}>
+      <NarrowPage title="Can't sign in" description={me.error} me={me}>
         <Button variant="link" asChild>
           <a href="/">Go to your services</a>
         </Button>
@@ -37,6 +37,7 @@ export function LoginRoute() {
   if (me.user) {
     return (
       <NarrowPage
+        me={me}
         title={`No access to ${service ?? "this"}`}
         description={
           <>
@@ -56,11 +57,15 @@ export function LoginRoute() {
   }
 
   return (
-    <NarrowPage title={signIn} description="Use the key you were given">
+    <NarrowPage title={signIn} description="Use the key you were given" me={me}>
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
           e.preventDefault();
+          if (key.trim().startsWith("tgs_")) {
+            setError("That's a setup key. Open the setup link from tailgate's logs instead");
+            return;
+          }
           setBusy(true);
           setError("");
           try {

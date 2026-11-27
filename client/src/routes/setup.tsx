@@ -5,30 +5,43 @@ import { ErrorText } from "../components/section";
 import { Button } from "../ui/button";
 import { CopyField } from "../ui/copy-field";
 import { Field, Input, Labelled } from "../ui/input";
+import { TooltipProvider } from "../ui/tooltip";
 
 export function SetupRoute() {
-  const token = new URLSearchParams(location.search).get("token") ?? "";
+  const setupKey = new URLSearchParams(location.search).get("key");
   const [name, setName] = useState("");
   const [key, setKey] = useState<NewKey>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  if (key) {
+  if (!setupKey) {
     return (
       <NarrowPage
         brand
-        title={`${name} is an admin`}
-        description="This key signs in as them. Copy it now, it's only shown once"
-      >
-        <div className="flex flex-col gap-6">
-          <Labelled label="Key">
-            <CopyField value={key.key} label="key" />
-          </Labelled>
-          <Button variant="primary" asChild className="w-full">
-            <a href="/login">Sign in</a>
-          </Button>
-        </div>
-      </NarrowPage>
+        title="This setup link is incomplete"
+        description="Open the setup link from tailgate's logs, it has the setup key in it"
+      />
+    );
+  }
+
+  if (key) {
+    return (
+      <TooltipProvider>
+        <NarrowPage
+          brand
+          title="Save your key"
+          description={`You'll sign in as ${name} with this key. Save it somewhere safe now, it's only shown once`}
+        >
+          <div className="flex flex-col gap-6">
+            <Labelled label="Key">
+              <CopyField value={key.key} label="key" />
+            </Labelled>
+            <Button variant="primary" asChild className="w-full">
+              <a href="/login">Sign in</a>
+            </Button>
+          </div>
+        </NarrowPage>
+      </TooltipProvider>
     );
   }
 
@@ -45,7 +58,7 @@ export function SetupRoute() {
           setBusy(true);
           setError("");
           try {
-            setKey(await api<NewKey>("POST", "/api/setup", { token, name }));
+            setKey(await api<NewKey>("POST", "/api/setup", { key: setupKey, name }));
           } catch (err) {
             setError((err as Error).message);
           }

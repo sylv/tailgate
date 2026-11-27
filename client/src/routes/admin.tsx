@@ -39,10 +39,10 @@ export default function AdminRoutes() {
     );
   }
 
-  const serviceNames = services?.services.filter((s) => !s.error).map((s) => s.name) ?? [];
+  const serviceIDs = services?.services.filter((s) => !s.error).map((s) => s.id) ?? [];
   const attention = !!services && needsAttention(services);
   return (
-    <AdminContext value={{ me, services, reloadServices, serviceNames }}>
+    <AdminContext value={{ me, services, reloadServices, serviceIDs }}>
       <TooltipProvider>
         <AdminShell attention={attention} name={me.user.name} canSignOut={me.via !== "tailnet"}>
           {servicesError && <p className="mb-6 text-[13px] text-danger">{servicesError}</p>}

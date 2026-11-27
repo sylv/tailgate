@@ -39,9 +39,9 @@ func newTestGate(t *testing.T) *testGate {
 	addr, port, _ := strings.Cut(strings.TrimPrefix(app.URL, "http://"), ":")
 	p, _ := strconv.Atoi(port)
 	tg.routes = map[string]service.Service{
-		"photos": {Name: "photos", Addr: addr, Port: p},
-		"open":   {Name: "open", Addr: addr, Port: p, DangerouslyDisableAuth: true},
-		"lyra":   {Name: "lyra"},
+		"photos": {ID: "photos", Hostname: "photos", Addr: addr, Port: p},
+		"open":   {ID: "open", Hostname: "open", Addr: addr, Port: p, DangerouslyDisableAuth: true},
+		"lyra":   {ID: "lyra", Hostname: "lyra"},
 	}
 	tg.hosts = func(name string) string {
 		return map[string]string{"": "tailgate.ts.net", "photos": "photos.ts.net", "open": "open.ts.net"}[name]
@@ -82,7 +82,7 @@ func TestSignedOut(t *testing.T) {
 		t.Fatalf("page navigation got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 	rec = do(tg.photos, "GET", "https://photos.ts.net/api/albums", nil)
-	if rec.Code != http.StatusUnauthorized || rec.Header().Get("Cache-Control") != "no-store" || !strings.Contains(rec.Body.String(), rec.Header().Get(requestIDHeader)) {
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("api request got %d %q", rec.Code, rec.Body)
 	}
 	if tg.got != nil {
@@ -273,7 +273,7 @@ func TestProxyHeaders(t *testing.T) {
 		}
 	}
 
-	tg.routes["open"] = service.Service{Name: "open", DangerouslyDisableAuth: true}
+	tg.routes["open"] = service.Service{ID: "open", Hostname: "open", DangerouslyDisableAuth: true}
 	for _, h := range []http.Handler{tg.open, tg.serviceHandler("unknown")} {
 		if rec := do(h, "GET", "https://open.ts.net/", nil); rec.Code != http.StatusBadGateway || rec.Header().Get("Cache-Control") != "no-store" {
 			t.Errorf("got %d", rec.Code)
@@ -299,6 +299,21 @@ func TestRules(t *testing.T) {
 	rec := do(tg.photos, "GET", "https://photos.ts.net/mcp", page())
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "No MCP") || tg.got != nil {
 		t.Fatalf("got %d %q", rec.Code, rec.Body)
+	}
+	// tailgate's own pages run pre-auth rules over funnel, but never on the tailnet
+	if rec := do(tg.funnel, "GET", "https://tailgate.ts.net/mcp", nil); rec.Code != http.StatusForbidden {
+		t.Errorf("funnel got %d", rec.Code)
+	}
+	if rec := do(tg.web, "GET", "https://tailgate.ts.net/mcp", nil); rec.Code == http.StatusForbidden {
+		t.Errorf("tailnet got %d", rec.Code)
+	}
+	for _, h := range []http.Handler{tg.photos, tg.funnel, tg.web} {
+		if rec := do(h, "GET", "https://photos.ts.net"+tracePath, http.Header{keyHeader: {tg.key}}); !strings.Contains(rec.Body.String(), "ip=100.64.0.7\n") {
+			t.Errorf("trace got %d %q", rec.Code, rec.Body)
+		}
+	}
+	if rec := do(tg.photos, "GET", "https://photos.ts.net"+tracePath, http.Header{keyHeader: {tg.key}}); !strings.Contains(rec.Body.String(), "auth=key\n") {
+		t.Errorf("trace got %q", rec.Body)
 	}
 
 	rec = do(tg.photos, "GET", "https://photos.ts.net/", http.Header{keyHeader: {tg.key}, "X-User": {"admin"}, "Cookie": {cookieName + "=nope"}})

@@ -14,12 +14,12 @@ export const ClientForm: FC<{
   onDone: (created?: Created) => void;
   onDelete?: () => void;
 }> = ({ client, onDone, onDelete }) => {
-  const { serviceNames } = useAdmin();
+  const { serviceIDs } = useAdmin();
   const [c, setC] = useState(client);
   const [uris, setURIs] = useState(client.redirectURIs.join("\n"));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const names = [...new Set([...serviceNames, client.service].filter(Boolean))].toSorted();
+  const names = [...new Set([...serviceIDs, client.service].filter(Boolean))].toSorted();
 
   return (
     <form

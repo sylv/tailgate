@@ -90,7 +90,7 @@ func plain(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	w.Header().Set("X-Robots-Tag", noindex)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	w.Write([]byte(msg + "\n\nrequest id: " + requestOf(r.Context()).id + "\n"))
+	w.Write([]byte(msg + "\n"))
 }
 
 func redirect(w http.ResponseWriter, to string) {
