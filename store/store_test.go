@@ -56,14 +56,14 @@ func TestSetup(t *testing.T) {
 
 func TestUsers(t *testing.T) {
 	s := open(t)
-	id, err := s.SaveUser(User{Name: "ezra", Note: "iPad", Services: []string{"photos", "lyra"}})
+	id, err := s.SaveUser(User{Name: "ezra", Note: "iPad", Apps: []string{"photos", "lyra"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SaveUser(User{Name: "ezra"}); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate name got %v", err)
 	}
-	if _, err := s.SaveUser(User{ID: id, Name: "ezra", Services: []string{"photos"}}); err != nil {
+	if _, err := s.SaveUser(User{ID: id, Name: "ezra", Apps: []string{"photos"}}); err != nil {
 		t.Fatal(err)
 	}
 	u, err := s.User(id)
@@ -71,7 +71,7 @@ func TestUsers(t *testing.T) {
 		t.Fatalf("got %+v, %v", u, err)
 	}
 	// only SetAdmin makes an admin
-	if _, err := s.SaveUser(User{ID: id, Name: "ezra", Admin: true, Services: []string{"photos"}}); err != nil {
+	if _, err := s.SaveUser(User{ID: id, Name: "ezra", Admin: true, Apps: []string{"photos"}}); err != nil {
 		t.Fatal(err)
 	}
 	if u, _ := s.User(id); u.Admin {
@@ -80,15 +80,15 @@ func TestUsers(t *testing.T) {
 	if err := s.SetAdmin(id, true); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := s.User(id); !u.Admin || !u.AllServices || !u.HasAccess("lyra") {
+	if u, _ := s.User(id); !u.Admin || !u.AllApps || !u.HasAccess("lyra") {
 		t.Fatalf("admin got %+v", u)
 	}
 	// an admin's saved choice is kept for when they're demoted
-	if _, err := s.SaveUser(User{ID: id, Name: "ezra", AllServices: true, Services: []string{"photos"}}); err != nil {
+	if _, err := s.SaveUser(User{ID: id, Name: "ezra", AllApps: true, Apps: []string{"photos"}}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetAdmin(id, false)
-	if u, _ := s.User(id); u.AllServices || u.HasAccess("lyra") {
+	if u, _ := s.User(id); u.AllApps || u.HasAccess("lyra") {
 		t.Fatalf("demoted admin got %+v", u)
 	}
 	if _, err := s.SaveUser(User{ID: "nope", Name: "x"}); !errors.Is(err, ErrNotFound) {
@@ -115,7 +115,7 @@ func TestUsers(t *testing.T) {
 
 func TestSessions(t *testing.T) {
 	s := open(t)
-	id, _ := s.SaveUser(User{Name: "ezra", Services: []string{"photos"}})
+	id, _ := s.SaveUser(User{Name: "ezra", Apps: []string{"photos"}})
 	key, err := s.AddKey(id, "ipad")
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// signing out on the tailgate node ends the service sessions too
+	// signing out on the tailgate node ends the app sessions too
 	if err := s.DeleteSession(ps.ID); err != nil {
 		t.Fatal(err)
 	}

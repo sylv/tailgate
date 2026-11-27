@@ -8,7 +8,7 @@ import { Field, Input } from "../ui/input";
 
 export function LoginRoute() {
   const q = new URLSearchParams(location.search);
-  // an app signing in through oidc names its service like ?to= does
+  // an app signing in through oidc names its app like ?to= does
   const target: Record<string, string> =
     location.pathname === "/oidc/authorize"
       ? { client: q.get("client_id") ?? "" }
@@ -20,15 +20,15 @@ export function LoginRoute() {
 
   if (loadError) return <NarrowPage title="Can't sign in" description={loadError} />;
   if (!me) return null;
-  const service = me.target;
-  const signIn = service ? `Sign in to ${service}` : "Sign in";
-  document.title = me.error ? "Can't sign in" : me.user ? `No access to ${service ?? "this"}` : signIn;
+  const app = me.target;
+  const signIn = app ? `Sign in to ${app}` : "Sign in";
+  document.title = me.error ? "Can't sign in" : me.user ? `No access to ${app ?? "this"}` : signIn;
 
   if (me.error) {
     return (
       <NarrowPage title="Can't sign in" description={me.error} me={me}>
         <Button variant="link" asChild>
-          <a href="/">Go to your services</a>
+          <a href="/">Go to your apps</a>
         </Button>
       </NarrowPage>
     );
@@ -38,18 +38,17 @@ export function LoginRoute() {
     return (
       <NarrowPage
         me={me}
-        title={`No access to ${service ?? "this"}`}
+        title={`No access to ${app ?? "this"}`}
         description={
           <>
-            You're signed in as <span className="text-fg">{me.user.name}</span>, who can't use{" "}
-            {service ?? "it"}
+            You're signed in as <span className="text-fg">{me.user.name}</span>, who can't use {app ?? "it"}
           </>
         }
       >
         <div className="flex items-center gap-4">
           {me.via !== "tailnet" && <Button onClick={() => signOut(location.href)}>Sign out</Button>}
           <Button variant="link" asChild>
-            <a href="/">Your services</a>
+            <a href="/">Your apps</a>
           </Button>
         </div>
       </NarrowPage>
@@ -70,7 +69,7 @@ export function LoginRoute() {
           setError("");
           try {
             await api("POST", "/api/login", { key });
-            // the server sends a signed in visitor on to the service, or says why it can't
+            // the server sends a signed in visitor on to the app, or says why it can't
             location.reload();
           } catch (err) {
             setError((err as Error).message);

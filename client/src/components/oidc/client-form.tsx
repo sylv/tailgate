@@ -14,12 +14,12 @@ export const ClientForm: FC<{
   onDone: (created?: Created) => void;
   onDelete?: () => void;
 }> = ({ client, onDone, onDelete }) => {
-  const { serviceIDs } = useAdmin();
+  const { appIDs } = useAdmin();
   const [c, setC] = useState(client);
   const [uris, setURIs] = useState(client.redirectURIs.join("\n"));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const names = [...new Set([...serviceIDs, client.service].filter(Boolean))].toSorted();
+  const names = [...new Set([...appIDs, client.app].filter(Boolean))].toSorted();
 
   return (
     <form
@@ -55,13 +55,13 @@ export const ClientForm: FC<{
             autoFocus={!c.id}
           />
         </Field>
-        <Labelled label="Service">
+        <Labelled label="App">
           <Select
-            label="Service"
-            placeholder="Choose a service"
-            value={c.service || undefined}
+            label="App"
+            placeholder="Choose an app"
+            value={c.app || undefined}
             options={names.map((n) => ({ value: n, label: n }))}
-            onValueChange={(service) => setC({ ...c, service })}
+            onValueChange={(app) => setC({ ...c, app })}
           />
         </Labelled>
       </div>
@@ -90,7 +90,7 @@ export const ClientForm: FC<{
         <Button variant="ghost" onClick={() => onDone()}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" loading={busy} disabled={!c.service}>
+        <Button type="submit" variant="primary" loading={busy} disabled={!c.app}>
           {c.id ? "Save" : "Add client"}
         </Button>
       </div>

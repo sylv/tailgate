@@ -181,7 +181,7 @@ export const RuleEditor: FC<{
             schema={schema}
             error={err("condition")}
             placeholder={
-              rule.section === "pre" ? 'ingress == "funnel" && country not in ["AU"]' : 'service.id == "lyra"'
+              rule.section === "pre" ? 'ingress == "funnel" && country not in ["AU"]' : 'app.id == "lyra"'
             }
           />
         </Labelled>

@@ -1,4 +1,4 @@
-package service
+package app
 
 import (
 	"strings"
@@ -7,11 +7,11 @@ import (
 	"github.com/sylv/tailgate/docker"
 )
 
-func one(t *testing.T, labels map[string]string) Service {
+func one(t *testing.T, labels map[string]string) App {
 	t.Helper()
 	got := FromContainers([]docker.Container{{Name: "c1", Labels: labels}}, "")
 	if len(got) != 1 {
-		t.Fatalf("got %d services, want 1", len(got))
+		t.Fatalf("got %d apps, want 1", len(got))
 	}
 	return got[0]
 }
@@ -24,7 +24,7 @@ func TestValid(t *testing.T) {
 		"tailgate.dangerously-disable-auth": "false",
 		"traefik.enable":                    "true",
 	})
-	want := Service{Container: "c1", ID: "photos", Hostname: "photos", Port: 2283, Funnel: true, Noindex: true}
+	want := App{Container: "c1", ID: "photos", Hostname: "photos", Port: 2283, Funnel: true, Noindex: true}
 	if s != want {
 		t.Fatalf("got %+v, want %+v", s, want)
 	}

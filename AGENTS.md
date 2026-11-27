@@ -1,4 +1,4 @@
-tailgate is a reverse proxy that puts Docker services on a tailnet and through Tailscale Funnel, each on its own hostname, behind a login. It is one Go binary with an embedded React UI. `README.md` has what it does and how it's used
+tailgate is a reverse proxy that puts Docker apps on a tailnet and through Tailscale Funnel, each on its own hostname, behind a login. It is one Go binary with an embedded React UI. `README.md` has what it does and how it's used
 
 ## Layout
 
@@ -9,13 +9,14 @@ tailgate is a reverse proxy that puts Docker services on a tailnet and through T
 
 tailgate decides what is reachable from the internet, so mistakes are costly
 
-- Fail closed. An unknown label, an unreadable database, a node whose name doesn't match its label or any other doubt means the service is not routed or the request is denied
+- Fail closed. An unknown label, an unreadable database, a node whose name doesn't match its label or any other doubt means the app is not routed or the request is denied
 - Whether a request came from the tailnet or from Funnel comes from which listener accepted it. Never infer it from an IP address or a header
-- Tailgate credentials and cookies never reach the upstream app. Strip them before proxying
+- Tailgate credentials and cookies never reach the app. Strip them before proxying
 
 ## Conventions
 
 - Go tests are `_test.go` files next to the code, run with `go test ./...`. Tests must not need a tailnet, Docker or the network
+- `.dockerignore` ignores everything by default and lists each Go package dir it keeps, so a new or renamed package has to be added there or the image build fails
 - tailgate runs as PID 1 in its container, so it handles SIGTERM itself and shuts down its nodes cleanly
 
 ## Style

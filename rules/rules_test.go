@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sylv/tailgate/service"
+	"github.com/sylv/tailgate/app"
 )
 
 func rule(section, cond string, effects ...Effect) Rule {
@@ -20,7 +20,7 @@ func TestCompileErrors(t *testing.T) {
 		want  string
 	}{
 		{rule(Pre, `user.name != "ezra"`, Effect{Type: Block}), "condition", "go in post-auth"},
-		{rule(Post, `service.addr != ""`, Effect{Type: Block}), "condition", "no value called addr"},
+		{rule(Post, `app.addr != ""`, Effect{Type: Block}), "condition", "no value called addr"},
 		{rule(Pre, `path`, Effect{Type: Block}), "condition", "expected bool"},
 		{rule(Pre, `true`, Effect{Type: Block}, Effect{Type: Skip}), "effects", "only have one"},
 		{rule(Pre, `true`, Effect{Type: Redirect, Value: `"/"`, Status: 200}), "effects.0", "status"},
@@ -29,7 +29,7 @@ func TestCompileErrors(t *testing.T) {
 		{rule(Post, `true`, Effect{Type: SetRequestHeader, Name: "x-forwarded-for", Value: `ip`}), "effects.0", "set by tailgate"},
 		{rule(Post, `true`, Effect{Type: RemoveRequestHeader, Name: "X-Real-IP"}), "effects.0", "set by tailgate"},
 		{rule(Post, `true`, Effect{Type: SetRequestHeader, Name: "X User", Value: `ip`}), "effects.0", "valid header"},
-		{rule(Post, `true`, Effect{Type: SetRequestHeader, Name: "X-Port", Value: `service.port`}), "effects.0", "expected string"},
+		{rule(Post, `true`, Effect{Type: SetRequestHeader, Name: "X-Port", Value: `app.port`}), "effects.0", "expected string"},
 	} {
 		_, errs := Compile([]Rule{c.rule})
 		if !slices.ContainsFunc(errs, func(e Error) bool { return e.Field == c.field && strings.Contains(e.Message, c.want) }) {
@@ -52,14 +52,14 @@ func TestRun(t *testing.T) {
 		rule(Pre, `ingress == "funnel" && country not in ["AU", "CA"]`, Effect{Type: Block, Value: `"Not in " + country`}),
 		{ID: "log", Section: Pre, Name: "try", Condition: `path startsWith "/mcp"`, Effects: []Effect{{Type: Block}}, Mode: "log"},
 		{ID: "off", Section: Pre, Name: "off", Condition: `true`, Effects: []Effect{{Type: Block}}, Mode: "off"},
-		rule(Post, `service.id == "lyra"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `user.name`}, Effect{Type: SetResponseHeader, Name: "Set-Cookie", Value: `"a=1"`}),
+		rule(Post, `app.id == "lyra"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `user.name`}, Effect{Type: SetResponseHeader, Name: "Set-Cookie", Value: `"a=1"`}),
 		rule(Post, `user.via == "key"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `"key:" + user.name`}, Effect{Type: RemoveRequestHeader, Name: "Referer"}),
 		rule(Post, `header("X-Old") == "1"`, Effect{Type: Redirect, Value: `"https://" + host + "/new"`, Status: 308}),
 	})
 	if errs != nil {
 		t.Fatal(errs)
 	}
-	base := Request{Ingress: "funnel", Country: "NZ", IP: "198.51.100.1", Host: "lyra.ts.net", Path: "/mcp", Service: service.Service{ID: "lyra"},
+	base := Request{Ingress: "funnel", Country: "NZ", IP: "198.51.100.1", Host: "lyra.ts.net", Path: "/mcp", App: app.App{ID: "lyra"},
 		Header: func(string) string { return "" }}
 
 	var res Result
@@ -133,10 +133,10 @@ func TestSchema(t *testing.T) {
 	for _, v := range Schema() {
 		pre[v.Name] = v.Pre
 	}
-	if !pre["user.signedIn"] || pre["user.name"] || !pre["service.dangerouslyDisableAuth"] || !pre["header"] {
+	if !pre["user.signedIn"] || pre["user.name"] || !pre["app.dangerouslyDisableAuth"] || !pre["header"] {
 		t.Errorf("got %v", pre)
 	}
-	if _, ok := pre["service.addr"]; ok {
+	if _, ok := pre["app.addr"]; ok {
 		t.Error("the container address is a value")
 	}
 }

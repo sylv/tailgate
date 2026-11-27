@@ -1,10 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { api, type NodeInfo, type Service } from "../api";
+import { api, type NodeInfo, type App } from "../api";
 import { PageHeader, useAdmin } from "../components/admin-shell";
-import { Confirm } from "../components/confirm";
-import { Empty, List } from "../components/section";
+import { Empty, List, Section } from "../components/section";
 import { Note } from "../components/note";
-import { nodeStatus, serviceStatus, StatusRing, type Status } from "../components/services/status";
+import { nodeStatus, appStatus, StatusRing, type Status } from "../components/apps/status";
 import { until } from "../lib/time";
 import { cn } from "../lib/utils";
 import { Button } from "../ui/button";
@@ -13,39 +12,20 @@ import { ExternalLink } from "../ui/external-link";
 
 const COLUMNS = "md:grid-cols-[minmax(0,1fr)_9rem_5rem_1.25rem]";
 
-export function ServicesRoute() {
-  const { services, reloadServices } = useAdmin();
-  const [confirming, setConfirming] = useState(false);
-  const [removed, setRemoved] = useState<string[]>();
-  if (!services) return null;
-  const funnel = services.services.some((s) => s.funnel && !s.error);
+export function AppsRoute() {
+  const { apps } = useAdmin();
+  if (!apps) return null;
+  const funnel = apps.apps.some((s) => s.funnel && !s.error);
 
   return (
     <>
-      <PageHeader
-        title="Services"
-        actions={
-          services.unused.length > 0 && (
-            <Button variant="danger" onClick={() => setConfirming(true)}>
-              Remove unused nodes
-            </Button>
-          )
-        }
-      />
+      <PageHeader title="Apps" />
       <div className="mb-4 flex flex-col gap-2 empty:hidden">
-        {services.problems.map((p) => (
+        {apps.problems.map((p) => (
           <Note key={p} tone="danger">
             {p}
           </Note>
         ))}
-        {removed && removed.length > 0 && (
-          <Note tone="info">
-            Logged out {removed.join(", ")}. Tailscale keeps the devices, so delete them in its{" "}
-            <ExternalLink href="https://login.tailscale.com/admin/machines" className="text-fg">
-              admin console
-            </ExternalLink>
-          </Note>
-        )}
       </div>
       <div className={cn("hidden gap-x-6 px-4 pb-2 text-xs text-fg-faint md:grid", COLUMNS)}>
         <span>Name</span>
@@ -55,47 +35,28 @@ export function ServicesRoute() {
       <List>
         <Row
           name="tailgate"
-          url={services.tailgate.url}
+          url={apps.tailgate.url}
           details={["This page and the login"]}
           reach={funnel ? "Funnel" : "Tailnet"}
-          status={nodeStatus(services.tailgate)}
+          status={nodeStatus(apps.tailgate)}
         >
-          <NodeNotes node={services.tailgate} />
+          <NodeNotes node={apps.tailgate} />
         </Row>
-        {services.services.map((s) => (
-          <ServiceRow key={s.container} service={s} />
-        ))}
-        {services.unused.map((name) => (
-          <Row
-            key={name}
-            name={name}
-            details={["Unused node"]}
-            status={{ tone: "unused", icon: "alert", label: "Unused" }}
-          >
-            <Note tone="unused">No container uses this name, but its node is still signed in</Note>
-          </Row>
+        {apps.apps.map((s) => (
+          <AppRow key={s.container} app={s} />
         ))}
       </List>
-      {services.services.length === 0 && <Empty>No containers have tailgate labels yet</Empty>}
-      <Confirm
-        open={confirming}
-        onClose={() => setConfirming(false)}
-        title="Remove unused nodes?"
-        description={`${services.unused.join(", ")} will be logged out and their state deleted. Tailscale keeps the devices, so you may have to delete them in its admin console too`}
-        action="Remove"
-        onConfirm={async () => {
-          setRemoved((await api<{ removed: string[] }>("POST", "/api/admin/remove-unused-nodes")).removed);
-          reloadServices();
-        }}
-      />
+      {apps.apps.length === 0 && <Empty>No containers have tailgate labels yet</Empty>}
+      {apps.unused.length > 0 && <LeftInTailscale names={apps.unused} />}
     </>
   );
 }
 
-function ServiceRow({ service: s }: { service: Service }) {
+function AppRow({ app: s }: { app: App }) {
   const details = [
     s.id && s.hostname !== s.id && `id ${s.id}`,
-    `container ${s.container}${s.upstream ? `, ${s.upstream}` : s.error ? "" : ", not running"}`,
+    `container ${s.container}${s.address ? `, ${s.address}` : s.error ? "" : ", not running"}`,
+    !!s.tailscaleService && "Tailscale service on the tailgate node",
     !s.error &&
       s.funnel &&
       s.dangerouslyDisableAuth &&
@@ -108,7 +69,7 @@ function ServiceRow({ service: s }: { service: Service }) {
       details={details}
       reach={s.error ? undefined : s.funnel ? "Funnel" : "Tailnet"}
       login={s.error ? undefined : s.dangerouslyDisableAuth ? "Off" : "On"}
-      status={serviceStatus(s)}
+      status={appStatus(s)}
     >
       {s.error && (
         <Note tone="danger">
@@ -172,9 +133,9 @@ function Row({
   );
 }
 
-// id is the service's, the tailgate node has none and logs back in by itself
+// id is the app's, the tailgate node has none and logs back in by itself
 function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
-  const { reloadServices } = useAdmin();
+  const { reloadApps } = useAdmin();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   return (
@@ -190,8 +151,8 @@ function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
                 setBusy(true);
                 setError("");
                 try {
-                  await api("POST", `/api/admin/services/${encodeURIComponent(id)}/login`);
-                  reloadServices();
+                  await api("POST", `/api/admin/apps/${encodeURIComponent(id)}/login`);
+                  reloadApps();
                 } catch (err) {
                   setError((err as Error).message);
                 }
@@ -229,5 +190,39 @@ function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
         <CopyField value={node.signCommand} label="command" />
       )}
     </>
+  );
+}
+
+// nodes and tailscale services no container uses anymore. tailgate can't delete devices,
+// so it waits for them to be deleted in the admin console and then forgets them
+function LeftInTailscale({ names }: { names: string[] }) {
+  return (
+    <Section
+      className="mt-8"
+      title="Left in Tailscale"
+      description="No container uses these anymore. Delete them in the Tailscale admin console and tailgate forgets them within a minute"
+    >
+      <List>
+        {names.map((name) => {
+          // tailscale services are named like svc:photos, nodes by their app's id
+          const app = name.startsWith("svc:");
+          return (
+            <Row
+              key={name}
+              name={name}
+              details={[app ? "Tailscale service" : "Node"]}
+              status={{ tone: "unused", icon: "alert", label: "Unused" }}
+            >
+              <ExternalLink
+                href={`https://login.tailscale.com/admin/${app ? "apps" : "machines"}`}
+                className="text-[13px]"
+              >
+                Delete it in the admin console
+              </ExternalLink>
+            </Row>
+          );
+        })}
+      </List>
+    </Section>
   );
 }

@@ -11,7 +11,7 @@ import { CopyField } from "../ui/copy-field";
 import { Dialog } from "../ui/dialog";
 import { Labelled } from "../ui/input";
 
-const blank: OIDCClient = { id: "", name: "", service: "", redirectURIs: [], createdAt: 0 };
+const blank: OIDCClient = { id: "", name: "", app: "", redirectURIs: [], createdAt: 0 };
 
 export function OIDCRoute() {
   const [list, error, reload] = useLoad(() => api<OIDCClients>("GET", "/api/admin/oidc-clients"), POLL);
@@ -66,7 +66,7 @@ export function OIDCRoute() {
                         <span className="block truncate underline-offset-2 group-hover:underline">
                           {c.name}
                         </span>
-                        <span className="block truncate text-[13px] text-fg-muted">For {c.service}</span>
+                        <span className="block truncate text-[13px] text-fg-muted">For {c.app}</span>
                       </span>
                       <span className="hidden min-w-0 text-[13px] text-fg-muted md:block">
                         {c.redirectURIs.map((u) => (

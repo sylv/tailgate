@@ -25,6 +25,10 @@ type request struct {
 	// rule is the rule that blocked or redirected the request
 	rule    string
 	ruleErr string
+	// identify reads the credentials once, a funnel request runs it for the rules and again for the page
+	identified bool
+	ident      *identity
+	identErr   error
 }
 
 type requestKey struct{}
@@ -83,7 +87,7 @@ func (r *recorder) Write(b []byte) (int, error) {
 // Unwrap lets http.ResponseController reach the connection, which the proxy needs for websockets and flushing
 func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// plain is every answer tailgate gives itself on a service host
+// plain is every answer tailgate gives itself on an app host
 func plain(w http.ResponseWriter, r *http.Request, status int, msg string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

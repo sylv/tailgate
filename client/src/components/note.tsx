@@ -1,7 +1,7 @@
 import { InfoIcon, WarningCircleIcon, WarningIcon } from "@phosphor-icons/react";
 import type { FC, ReactNode } from "react";
 import { cn } from "../lib/utils";
-import { toneText } from "./services/status";
+import { toneText } from "./apps/status";
 
 // a warning or an error under the thing it's about, always an icon and text
 export const Note: FC<{

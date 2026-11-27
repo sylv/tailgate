@@ -1,4 +1,4 @@
-import type { FC, ReactNode } from "react";
+import { useState, type FC, type ReactNode } from "react";
 import type { Me } from "../api";
 import { Wordmark } from "../ui/logo";
 
@@ -12,20 +12,28 @@ export const NarrowPage: FC<{
   // me puts how the visitor got here and the request id in the footer, for when they need help
   me?: Me;
 }> = ({ title, description, children, brand, me }) => (
-  <main className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center px-4 pt-12 pb-[18vh]">
-    {brand && (
-      <a href="/" className="mb-10 w-fit">
-        <Wordmark />
-      </a>
-    )}
-    {title && <h1 className="text-xl">{title}</h1>}
-    {description && <p className="mt-1 text-sm text-fg-muted">{description}</p>}
-    {children && <div className="mt-6">{children}</div>}
-    {me && (
-      <footer className="fixed inset-x-0 bottom-4 px-4 text-center text-xs text-fg-faint">
-        {me.ingress === "funnel" ? "Through Funnel" : "On the tailnet"}, request{" "}
-        <span className="font-mono select-all">{me.requestId}</span>
-      </footer>
-    )}
-  </main>
+  <div className="mx-auto flex min-h-dvh w-full max-w-sm flex-col px-4">
+    <main className="my-auto pt-12 pb-[18vh]">
+      {brand && (
+        <a href="/" className="mb-10 block w-fit">
+          <Wordmark />
+        </a>
+      )}
+      {title && <h1 className="text-xl">{title}</h1>}
+      {description && <p className="mt-1 text-sm text-fg-muted">{description}</p>}
+      {children && <div className="mt-6">{children}</div>}
+    </main>
+    {me && <Footer me={me} />}
+  </div>
 );
+
+// the request id is the page's first, polling would change it every few seconds
+const Footer: FC<{ me: Me }> = ({ me }) => {
+  const [requestId] = useState(me.requestId);
+  return (
+    <footer className="pb-4 text-center text-xs text-fg-faint">
+      {me.ingress === "funnel" ? "Through Funnel" : "On the tailnet"}, request{" "}
+      <span className="font-mono select-all">{requestId}</span>
+    </footer>
+  );
+};

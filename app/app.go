@@ -1,4 +1,4 @@
-package service
+package app
 
 import (
 	"cmp"
@@ -16,12 +16,12 @@ import (
 
 const prefix = "tailgate."
 
-// Service is one container with tailgate labels. A service with Err set
-// isn't routed and has no node. The expr tags are the service.* values rules see
-type Service struct {
+// App is one container with tailgate labels. An app with Err set
+// isn't routed and has no node. The expr tags are the app.* values rules see
+type App struct {
 	Container string `expr:"-"`
 	Addr      string `expr:"-"`
-	// ID is what tailgate keeps the service's grants, rules, sessions and node state under
+	// ID is what tailgate keeps the app's grants, rules, sessions and node state under
 	ID string `expr:"id" desc:"tailgate.id, \"\" for tailgate's own pages"`
 	// Hostname is the node's name on the tailnet, so its domain
 	Hostname               string `expr:"hostname" desc:"tailgate.hostname, or the id when it isn't set"`
@@ -52,12 +52,12 @@ func init() {
 // the id names the node's state dir and is the default hostname, so both have to be plain dns labels
 var validName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// FromContainers turns each container's labels into a service. Containers
+// FromContainers turns each container's labels into an app. Containers
 // without tailgate labels are skipped. network is TAILGATE_NETWORK, the
 // network to reach containers on when they don't say. The result is sorted by
 // id, then container
-func FromContainers(containers []docker.Container, network string) []Service {
-	var services []Service
+func FromContainers(containers []docker.Container, network string) []App {
+	var apps []App
 	// an id or hostname used twice breaks every container using it
 	used := map[string][]int{}
 	for _, c := range containers {
@@ -71,12 +71,12 @@ func FromContainers(containers []docker.Container, network string) []Service {
 			s.Err = errors.Join(s.Err, err)
 		}
 		if s.ID != "" {
-			used["id "+s.ID] = append(used["id "+s.ID], len(services))
+			used["id "+s.ID] = append(used["id "+s.ID], len(apps))
 		}
 		if s.Hostname != "" {
-			used["hostname "+s.Hostname] = append(used["hostname "+s.Hostname], len(services))
+			used["hostname "+s.Hostname] = append(used["hostname "+s.Hostname], len(apps))
 		}
-		services = append(services, s)
+		apps = append(apps, s)
 	}
 	for key, idx := range used {
 		if len(idx) < 2 {
@@ -84,20 +84,20 @@ func FromContainers(containers []docker.Container, network string) []Service {
 		}
 		kind, value, _ := strings.Cut(key, " ")
 		for _, i := range idx {
-			services[i].Err = errors.Join(services[i].Err, fmt.Errorf("%d containers use the %s %q", len(idx), kind, value))
+			apps[i].Err = errors.Join(apps[i].Err, fmt.Errorf("%d containers use the %s %q", len(idx), kind, value))
 		}
 	}
-	sort.Slice(services, func(i, j int) bool {
-		if services[i].ID != services[j].ID {
-			return services[i].ID < services[j].ID
+	sort.Slice(apps, func(i, j int) bool {
+		if apps[i].ID != apps[j].ID {
+			return apps[i].ID < apps[j].ID
 		}
-		return services[i].Container < services[j].Container
+		return apps[i].Container < apps[j].Container
 	})
-	return services
+	return apps
 }
 
-func parse(labels map[string]string) (Service, bool) {
-	var s Service
+func parse(labels map[string]string) (App, bool) {
+	var s App
 	values := map[string]string{}
 	seen := map[string]string{}
 	var errs []error

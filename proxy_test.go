@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sylv/tailgate/app"
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
-	"github.com/sylv/tailgate/service"
 	"github.com/sylv/tailgate/store"
 )
 
@@ -34,11 +34,11 @@ func newTestGate(t *testing.T) *testGate {
 	}
 	t.Cleanup(func() { db.Close() })
 	tg := &testGate{gate: newGate(db, nil)}
-	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { tg.got = r }))
-	t.Cleanup(app.Close)
-	addr, port, _ := strings.Cut(strings.TrimPrefix(app.URL, "http://"), ":")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { tg.got = r }))
+	t.Cleanup(upstream.Close)
+	addr, port, _ := strings.Cut(strings.TrimPrefix(upstream.URL, "http://"), ":")
 	p, _ := strconv.Atoi(port)
-	tg.routes = map[string]service.Service{
+	tg.routes = map[string]app.App{
 		"photos": {ID: "photos", Hostname: "photos", Addr: addr, Port: p},
 		"open":   {ID: "open", Hostname: "open", Addr: addr, Port: p, DangerouslyDisableAuth: true},
 		"lyra":   {ID: "lyra", Hostname: "lyra"},
@@ -47,8 +47,8 @@ func newTestGate(t *testing.T) *testGate {
 		return map[string]string{"": "tailgate.ts.net", "photos": "photos.ts.net", "open": "open.ts.net"}[name]
 	}
 	tg.gate.peer = func(context.Context) (*node.Peer, error) { return tg.peer, nil }
-	tg.web, tg.funnel, tg.photos, tg.open = tg.gate.web(false), tg.gate.web(true), tg.serviceHandler("photos"), tg.serviceHandler("open")
-	id, _ := db.SaveUser(store.User{Name: "ezra", Email: "ezra@example.com", Services: []string{"photos"}})
+	tg.web, tg.funnel, tg.photos, tg.open = tg.gate.web(false), tg.gate.web(true), tg.appHandler("photos"), tg.appHandler("open")
+	id, _ := db.SaveUser(store.User{Name: "ezra", Email: "ezra@example.com", Apps: []string{"photos"}})
 	tg.key, _ = db.AddKey(id, "")
 	return tg
 }
@@ -98,7 +98,7 @@ func TestLoginFlow(t *testing.T) {
 	tg := newTestGate(t)
 	api := http.Header{"Origin": {"https://tailgate.ts.net"}, "Content-Type": {"application/json"}}
 
-	// writes from anywhere but tailgate's own pages are refused, including from a service on the same site
+	// writes from anywhere but tailgate's own pages are refused, including from an app on the same site
 	if rec := do(tg.web, "POST", "https://tailgate.ts.net/api/login", http.Header{"Sec-Fetch-Site": {"same-site"}, "Origin": {"https://photos.ts.net"}}); rec.Code != http.StatusForbidden {
 		t.Fatalf("cross origin write got %d", rec.Code)
 	}
@@ -123,43 +123,43 @@ func TestLoginFlow(t *testing.T) {
 		t.Fatalf("login got %d %q", rec.Code, loc)
 	}
 	// a code only works on the host it was made for, and only once
-	if rec := do(tg.serviceHandler("lyra"), "GET", "https://lyra.ts.net"+loc.RequestURI(), page()); rec.Code != http.StatusNotFound {
+	if rec := do(tg.appHandler("lyra"), "GET", "https://lyra.ts.net"+loc.RequestURI(), page()); rec.Code != http.StatusNotFound {
 		t.Fatalf("code on another host got %d", rec.Code)
 	}
 	rec = do(tg.web, "GET", "https://tailgate.ts.net/login?to="+url.QueryEscape("photos:/albums?x=1"), signedIn)
 	loc, _ = url.Parse(rec.Header().Get("Location"))
 	rec = do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), page())
-	service := cookie(rec)
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/albums?x=1" || service == "" {
+	app := cookie(rec)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/albums?x=1" || app == "" {
 		t.Fatalf("callback got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 	if rec := do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), page()); rec.Code != http.StatusNotFound {
 		t.Fatalf("reused code got %d", rec.Code)
 	}
 
-	// the tailgate node's session doesn't work on the service, the service's own one does
+	// the tailgate node's session doesn't work on the app, the app's own one does
 	if rec := do(tg.photos, "GET", "https://photos.ts.net/", signedIn); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("tailgate cookie on photos got %d", rec.Code)
 	}
-	if rec := do(tg.photos, "GET", "https://photos.ts.net/", http.Header{"Cookie": {"theme=dark; " + cookieName + "=" + service}}); rec.Code != http.StatusOK {
+	if rec := do(tg.photos, "GET", "https://photos.ts.net/", http.Header{"Cookie": {"theme=dark; " + cookieName + "=" + app}}); rec.Code != http.StatusOK {
 		t.Fatalf("signed in got %d", rec.Code)
 	}
 	if c := tg.got.Header.Get("Cookie"); c != "theme=dark" {
 		t.Fatalf("app got cookies %q", c)
 	}
 
-	// no code for a service the user can't reach
+	// no code for an app the user can't reach
 	if rec := do(tg.web, "GET", "https://tailgate.ts.net/login?to="+url.QueryEscape("lyra:/"), signedIn); rec.Code == http.StatusFound {
 		t.Fatalf("got a code for lyra: %q", rec.Header().Get("Location"))
 	}
 
-	// signing out on the tailgate node ends the service session too
+	// signing out on the tailgate node ends the app session too
 	h := api.Clone()
 	h.Set("Cookie", cookieName+"="+session)
 	if rec := do(tg.web, "POST", "https://tailgate.ts.net/api/logout", h); rec.Code != http.StatusOK {
 		t.Fatalf("sign out got %d", rec.Code)
 	}
-	if rec := do(tg.photos, "GET", "https://photos.ts.net/", http.Header{"Cookie": {cookieName + "=" + service}}); rec.Code != http.StatusUnauthorized {
+	if rec := do(tg.photos, "GET", "https://photos.ts.net/", http.Header{"Cookie": {cookieName + "=" + app}}); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("after sign out got %d", rec.Code)
 	}
 }
@@ -186,7 +186,7 @@ func TestKeys(t *testing.T) {
 	if rec := do(tg.photos, "GET", "https://photos.ts.net/", http.Header{"Authorization": {"Bearer tg_wrong"}}); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong key got %d", rec.Code)
 	}
-	if rec := do(tg.serviceHandler("lyra"), "GET", "https://lyra.ts.net/", http.Header{keyHeader: {tg.key}}); rec.Code != http.StatusForbidden {
+	if rec := do(tg.appHandler("lyra"), "GET", "https://lyra.ts.net/", http.Header{keyHeader: {tg.key}}); rec.Code != http.StatusForbidden {
 		t.Fatalf("no access got %d", rec.Code)
 	}
 }
@@ -260,9 +260,9 @@ func TestProxyHeaders(t *testing.T) {
 		t.Errorf("got host %q path %q", tg.got.Host, tg.got.URL.Path)
 	}
 
-	// search engines are asked to skip tailgate's pages, and services unless they opt out
+	// search engines are asked to skip tailgate's pages, and apps unless they opt out
 	if v := rec.Header().Get("X-Robots-Tag"); v != "" {
-		t.Errorf("noindex=false service got X-Robots-Tag %q", v)
+		t.Errorf("noindex=false app got X-Robots-Tag %q", v)
 	}
 	s := tg.routes["open"]
 	s.Noindex = true
@@ -273,8 +273,8 @@ func TestProxyHeaders(t *testing.T) {
 		}
 	}
 
-	tg.routes["open"] = service.Service{ID: "open", Hostname: "open", DangerouslyDisableAuth: true}
-	for _, h := range []http.Handler{tg.open, tg.serviceHandler("unknown")} {
+	tg.routes["open"] = app.App{ID: "open", Hostname: "open", DangerouslyDisableAuth: true}
+	for _, h := range []http.Handler{tg.open, tg.appHandler("unknown")} {
 		if rec := do(h, "GET", "https://open.ts.net/", nil); rec.Code != http.StatusBadGateway || rec.Header().Get("Cache-Control") != "no-store" {
 			t.Errorf("got %d", rec.Code)
 		}
@@ -331,7 +331,7 @@ func TestRules(t *testing.T) {
 	}
 	tg.peer = nil
 
-	// saved rules that don't compile block every service request
+	// saved rules that don't compile block every app request
 	tg.db.SaveRules([]rules.Rule{{ID: "1", Section: rules.Pre, Name: "broken", Condition: `nope`, Effects: []rules.Effect{{Type: rules.Block}}, Mode: "on"}})
 	tg.loadRules()
 	for _, h := range []http.Handler{tg.photos, tg.open} {

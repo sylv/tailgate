@@ -12,12 +12,12 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
   onSave,
   saveLabel,
 }) => {
-  const { serviceIDs } = useAdmin();
+  const { appIDs } = useAdmin();
   const [u, setU] = useState(user);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // services that were granted but have no container right now stay listed
-  const names = [...new Set([...serviceIDs, ...user.services])].toSorted();
+  // apps that were granted but have no container right now stay listed
+  const names = [...new Set([...appIDs, ...user.apps])].toSorted();
   const dirty = !user.id || JSON.stringify(u) !== JSON.stringify(user);
 
   return (
@@ -57,24 +57,24 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
           </Field>
         </div>
       </Section>
-      <Section title="Services">
+      <Section title="Apps">
         <Checkbox
-          label="Every service"
-          description={u.admin ? "Admins can reach every service" : "Including ones added later"}
-          checked={u.allServices}
+          label="Every app"
+          description={u.admin ? "Admins can reach every app" : "Including ones added later"}
+          checked={u.allApps}
           disabled={u.admin}
-          onCheckedChange={(allServices) => setU({ ...u, allServices })}
+          onCheckedChange={(allApps) => setU({ ...u, allApps })}
         />
-        {!u.allServices && (
+        {!u.allApps && (
           <div className="grid animate-enter gap-x-4 gap-y-2.5 rounded-md border border-line p-4 sm:grid-cols-2">
-            {names.length === 0 && <p className="text-[13px] text-fg-muted">No services yet</p>}
+            {names.length === 0 && <p className="text-[13px] text-fg-muted">No apps yet</p>}
             {names.map((name) => (
               <Checkbox
                 key={name}
                 label={name}
-                checked={u.services.includes(name)}
+                checked={u.apps.includes(name)}
                 onCheckedChange={(on) =>
-                  setU({ ...u, services: on ? [...u.services, name] : u.services.filter((s) => s !== name) })
+                  setU({ ...u, apps: on ? [...u.apps, name] : u.apps.filter((s) => s !== name) })
                 }
               />
             ))}

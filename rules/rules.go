@@ -18,7 +18,7 @@ import (
 	"github.com/expr-lang/expr/vm"
 	"golang.org/x/net/http/httpguts"
 
-	"github.com/sylv/tailgate/service"
+	"github.com/sylv/tailgate/app"
 )
 
 const (
@@ -57,16 +57,16 @@ type Effect struct {
 
 // Request is every value a rule sees except user
 type Request struct {
-	Ingress   string          `expr:"ingress" desc:"\"tailnet\" or \"funnel\""`
-	Service   service.Service `expr:"service"`
-	Host      string          `expr:"host" desc:"The request's host, like photos.your-tailnet.ts.net"`
-	Method    string          `expr:"method" desc:"\"GET\", \"POST\" and so on"`
-	Path      string          `expr:"path" desc:"The path without the query, like /mcp"`
-	Query     string          `expr:"query" desc:"The raw query string without the ?"`
-	IP        string          `expr:"ip" desc:"The client IP, the same one sent in X-Real-IP"`
-	Country   string          `expr:"country" desc:"ISO 3166 code like \"AU\", or \"\" for tailnet requests and unknown IPs"`
-	UserAgent string          `expr:"userAgent" desc:"The User-Agent header"`
-	Tailnet   Tailnet         `expr:"tailnet"`
+	Ingress   string  `expr:"ingress" desc:"\"tailnet\" or \"funnel\""`
+	App       app.App `expr:"app"`
+	Host      string  `expr:"host" desc:"The request's host, like photos.your-tailnet.ts.net"`
+	Method    string  `expr:"method" desc:"\"GET\", \"POST\" and so on"`
+	Path      string  `expr:"path" desc:"The path without the query, like /mcp"`
+	Query     string  `expr:"query" desc:"The raw query string without the ?"`
+	IP        string  `expr:"ip" desc:"The client IP, the same one sent in X-Real-IP"`
+	Country   string  `expr:"country" desc:"ISO 3166 code like \"AU\", or \"\" for tailnet requests and unknown IPs"`
+	UserAgent string  `expr:"userAgent" desc:"The User-Agent header"`
+	Tailnet   Tailnet `expr:"tailnet"`
 
 	Header func(name string) string `expr:"header" desc:"The request header's value, \"\" when missing. Names are case-insensitive"`
 	Cookie func(name string) string `expr:"cookie" desc:"The request cookie's value, \"\" when missing"`
@@ -85,7 +85,7 @@ type User struct {
 	Name      string `expr:"name" desc:"The user's name, \"\" when not signed in"`
 	Email     string `expr:"email" desc:"The user's email, \"\" when unset"`
 	Admin     bool   `expr:"admin" desc:"The user is an admin"`
-	HasAccess bool   `expr:"hasAccess" desc:"The user's service list includes this service"`
+	HasAccess bool   `expr:"hasAccess" desc:"The user's app list includes this app"`
 	Via       string `expr:"via" desc:"\"session\", \"key\", \"tailnet\" or \"\""`
 }
 
@@ -296,7 +296,7 @@ type header struct {
 	name, value      string
 }
 
-// ApplyRequest changes the request to the upstream
+// ApplyRequest changes the request to the app
 func (res *Result) ApplyRequest(h http.Header) {
 	for _, op := range res.headers {
 		switch {
@@ -309,7 +309,7 @@ func (res *Result) ApplyRequest(h http.Header) {
 	}
 }
 
-// ApplyResponse changes the upstream's response. Set-Cookie is added next to the app's cookies
+// ApplyResponse changes the app's response. Set-Cookie is added next to the app's cookies
 func (res *Result) ApplyResponse(h http.Header) {
 	for _, op := range res.headers {
 		switch {

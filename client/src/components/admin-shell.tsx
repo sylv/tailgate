@@ -1,16 +1,16 @@
 import { SignOutIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { createContext, useContext, type FC, type ReactNode } from "react";
-import { signOut, type Me, type Services } from "../api";
+import { signOut, type Me, type Apps } from "../api";
 import { IconButton } from "../ui/icon-button";
 import { Wordmark } from "../ui/logo";
 import { NavTab } from "../ui/nav-tabs";
 
 export interface AdminData {
   me: Me;
-  services: Services | undefined;
-  reloadServices: () => void;
-  /** services that are routed now, for pickers */
-  serviceIDs: string[];
+  apps: Apps | undefined;
+  reloadApps: () => void;
+  /** apps that are routed now, for pickers */
+  appIDs: string[];
 }
 
 export const AdminContext = createContext<AdminData | null>(null);
@@ -18,7 +18,7 @@ export const useAdmin = () => useContext(AdminContext)!;
 
 const tabs = [
   ["users", "Users"],
-  ["services", "Services"],
+  ["apps", "Apps"],
   ["rules", "Rules"],
   ["oidc", "OIDC"],
 ] as const;
@@ -42,7 +42,7 @@ export const AdminShell: FC<{
         {tabs.map(([path, label]) => (
           <NavTab key={path} to={`/admin/${path}`}>
             {label}
-            {path === "services" && attention && (
+            {path === "apps" && attention && (
               <WarningCircleIcon weight="fill" className="size-4 text-warning" aria-label="Needs attention" />
             )}
           </NavTab>

@@ -4,6 +4,9 @@ import (
 	"cmp"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,7 +34,7 @@ const (
 	NeedsSigning   State = "needs signing"
 	// CertPending nodes are waiting for a cert, Status.Err and RetryAt say why and until when
 	CertPending State = "cert pending"
-	// LoggedOut service nodes wait for Manager.Login, the tailgate node logs back in itself
+	// LoggedOut app nodes wait for Manager.Login, the tailgate node logs back in itself
 	LoggedOut     State = "logged out"
 	NeedsApproval State = "needs approval"
 	// WrongName nodes wait for the device to be renamed in the tailscale admin console, Status.Err says to what
@@ -52,56 +55,34 @@ type Status struct {
 	SignCommand string
 	Err         error
 	RetryAt     time.Time
+	// Service is set when the tailgate node serves it as a tailscale service
+	Service bool
 }
 
-type Node struct {
-	name          string
-	self          bool
-	srv           *tsnet.Server
-	cancel        context.CancelFunc
-	done          chan struct{}
-	ready         chan struct{}
-	changed       chan struct{}
-	funnelChanged chan struct{}
+// box holds a node's or a tailscale service's status and logs its changes
+type box struct {
+	// key is "node" or "service", for the logs
+	key, name string
 
-	mu       sync.Mutex
-	status   Status
-	funnel   bool
-	loginErr error
-
-	// only run's goroutine uses these
-	hs, fs     *http.Server
-	joined     bool
-	loggingIn  bool
-	warnedLock bool
-	// certFor is the name the cert fields are about
-	certFor  string
-	certOK   bool
-	certErr  error
-	certWait time.Duration
-	certNext time.Time
+	smu    sync.Mutex
+	status Status
 }
 
-func (n *Node) Status() Status {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.status
+func (b *box) Status() Status {
+	b.smu.Lock()
+	defer b.smu.Unlock()
+	return b.status
 }
 
-// Ready is closed once the node has joined, has its cert and serves the tailnet
-func (n *Node) Ready() <-chan struct{} { return n.ready }
-
-// Done is closed once the node has stopped, including when it failed
-func (n *Node) Done() <-chan struct{} { return n.done }
-
-func (n *Node) set(f func(*Status)) {
-	n.mu.Lock()
-	before := n.status
-	f(&n.status)
-	after := n.status
-	n.mu.Unlock()
+func (b *box) set(f func(*Status)) {
+	b.smu.Lock()
+	before := b.status
+	f(&b.status)
+	b.status.Service = b.key == "service"
+	after := b.status
+	b.smu.Unlock()
 	if before.State != after.State || before.SignCommand != after.SignCommand {
-		attrs := []any{"node", n.name, "state", after.State}
+		attrs := []any{b.key, b.name, "state", after.State}
 		if after.DNSName != "" {
 			attrs = append(attrs, "dns_name", after.DNSName)
 		}
@@ -111,7 +92,7 @@ func (n *Node) set(f func(*Status)) {
 		if after.Err != nil {
 			attrs = append(attrs, "error", after.Err.Error())
 		}
-		msg, level := "node state", slog.LevelInfo
+		msg, level := b.key+" state", slog.LevelInfo
 		switch after.State {
 		case Failed, AuthKeyInvalid:
 			level = slog.LevelError
@@ -130,6 +111,60 @@ func (n *Node) set(f func(*Status)) {
 	}
 }
 
+// to moves to st, keeping the DNS name
+func (b *box) to(st Status) {
+	b.set(func(s *Status) {
+		st.DNSName = s.DNSName
+		*s = st
+	})
+}
+
+func (b *box) fail(err error) { b.to(Status{State: Failed, Err: err}) }
+
+// certState is how getting the cert for name is going. dir is the node's state dir, which caches it
+type certState struct {
+	name string
+	dir  string
+	ok   bool
+	err  error
+	wait time.Duration
+	next time.Time
+}
+
+type Node struct {
+	box
+	self          bool
+	srv           *tsnet.Server
+	cancel        context.CancelFunc
+	done          chan struct{}
+	ready         chan struct{}
+	changed       chan struct{}
+	funnelChanged chan struct{}
+
+	mu       sync.Mutex
+	funnel   bool
+	loginErr error
+	// want is the tailscale services the tailgate node should serve, by app id
+	want map[string]*hosted
+
+	// only run's goroutine uses these
+	hs, fs    *http.Server
+	joined    bool
+	loggingIn bool
+	cert      certState
+	serving   map[string]*hosted
+	// fresh nodes have no state yet, so they join with a new auth key
+	fresh bool
+	// shuttingDown keeps the services' statuses as they were, they're only reset for a reconnect
+	shuttingDown bool
+}
+
+// Ready is closed once the node has joined under its own name
+func (n *Node) Ready() <-chan struct{} { return n.ready }
+
+// Done is closed once the node has stopped, including when it failed
+func (n *Node) Done() <-chan struct{} { return n.done }
+
 // SetFunnel turns the node's funnel listener on or off
 func (n *Node) SetFunnel(on bool) {
 	n.mu.Lock()
@@ -147,32 +182,20 @@ func (n *Node) wantsFunnel() bool {
 	return n.funnel
 }
 
-// to moves the node to st, keeping its DNS name
-func (n *Node) to(st Status) {
-	n.set(func(s *Status) {
-		st.DNSName = s.DNSName
-		*s = st
-	})
-}
-
-func (n *Node) fail(err error) { n.to(Status{State: Failed, Err: err}) }
-
 type Manager struct {
 	dataDir string
-	authKey string
+	api     *API
 	// one cert request at a time so starting many nodes doesn't hit let's encrypt rate limits, see cert
 	certSem chan struct{}
 
-	mu    sync.Mutex
-	self  *Node
-	nodes map[string]*Node
-	// removing has the unused nodes being removed, which can't be started meanwhile
-	removing map[string]bool
+	mu       sync.Mutex
+	self     *Node
+	nodes    map[string]*Node
 	untagged bool
 }
 
-func NewManager(dataDir, authKey string) *Manager {
-	return &Manager{dataDir: dataDir, authKey: authKey, certSem: make(chan struct{}, 1), nodes: map[string]*Node{}, removing: map[string]bool{}}
+func NewManager(dataDir string, api *API) *Manager {
+	return &Manager{dataDir: dataDir, api: api, certSem: make(chan struct{}, 1), nodes: map[string]*Node{}}
 }
 
 func (m *Manager) nodesDir() string { return filepath.Join(m.dataDir, "nodes") }
@@ -185,8 +208,8 @@ func (m *Manager) StartSelf(hostname string, tailnet, funnel http.Handler) *Node
 	return m.self
 }
 
-// Start starts the node for a service unless it's already running, and turns
-// its funnel on or off. Nodes are kept under the service's id, so a new
+// Start starts the node for an app unless it's already running, and turns
+// its funnel on or off. Nodes are kept under the app's id, so a new
 // hostname restarts the node with the same state dir and device
 func (m *Manager) Start(id, hostname string, h http.Handler, funnel bool) {
 	m.mu.Lock()
@@ -198,7 +221,7 @@ func (m *Manager) Start(id, hostname string, h http.Handler, funnel bool) {
 		m.mu.Lock()
 	}
 	defer m.mu.Unlock()
-	if m.untagged || m.removing[id] {
+	if m.untagged {
 		return
 	}
 	if m.nodes[id] == nil {
@@ -207,7 +230,7 @@ func (m *Manager) Start(id, hostname string, h http.Handler, funnel bool) {
 	m.nodes[id].SetFunnel(funnel)
 }
 
-// Stop stops a service's node and keeps its state dir
+// Stop stops an app's node and keeps its state dir
 func (m *Manager) Stop(id string) {
 	m.mu.Lock()
 	n := m.nodes[id]
@@ -219,7 +242,7 @@ func (m *Manager) Stop(id string) {
 	}
 }
 
-// Running lists the ids of the services that have a node, failed ones too
+// Running lists the ids of the apps that have a node, failed ones too
 func (m *Manager) Running() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -232,7 +255,7 @@ func (m *Manager) Self() *Node {
 	return m.self
 }
 
-// Get returns the node of the service with this id
+// Get returns the node of the app with this id
 func (m *Manager) Get(id string) *Node {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -262,14 +285,15 @@ func (n *Node) stop() {
 func (m *Manager) start(name, dir string, self bool, tailnet, funnel http.Handler) *Node {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
-		name:          name,
+		box:           box{key: "node", name: name, status: Status{State: Starting}},
 		self:          self,
 		cancel:        cancel,
 		done:          make(chan struct{}),
 		ready:         make(chan struct{}),
 		changed:       make(chan struct{}, 1),
 		funnelChanged: make(chan struct{}, 1),
-		status:        Status{State: Starting},
+		want:          map[string]*hosted{},
+		serving:       map[string]*hosted{},
 		srv: &tsnet.Server{
 			Dir:      dir,
 			Hostname: name,
@@ -285,10 +309,9 @@ func (m *Manager) start(name, dir string, self bool, tailnet, funnel http.Handle
 		},
 	}
 	// tailscale sends the auth key with every login, so a removed node could come back on
-	// its own. only new nodes and the tailgate node get it, a logged out service node waits for Login
-	if _, err := os.Stat(filepath.Join(dir, "tailscaled.state")); self || errors.Is(err, os.ErrNotExist) {
-		n.srv.AuthKey = m.authKey
-	}
+	// its own. only new nodes get one, a logged out app node waits for Login
+	_, err := os.Stat(filepath.Join(dir, "tailscaled.state"))
+	n.fresh = errors.Is(err, os.ErrNotExist)
 	slog.Info("node state", "node", name, "state", Starting)
 	go m.run(ctx, n, tailnet, funnel)
 	return n
@@ -302,13 +325,23 @@ func (m *Manager) run(ctx context.Context, n *Node, tailnet, funnel http.Handler
 		n.fail(err)
 		return
 	}
+	// a tailscale service tailgate made with the node's name holds the name
+	if !n.self && retry(ctx, &n.box, func() error { return m.api.undefine(ctx, "svc:"+n.name) }) != nil {
+		return
+	}
+	if n.fresh && retry(ctx, &n.box, func() (err error) { n.srv.AuthKey, err = m.api.authKey(ctx); return err }) != nil {
+		return
+	}
 	defer n.srv.Close()
 	lc, err := n.srv.LocalClient()
 	if err != nil {
 		n.fail(err)
 		return
 	}
-	defer n.stopServing()
+	defer func() {
+		n.shuttingDown = true
+		n.stopServing()
+	}()
 	// the watch ends with run, including when the node fails
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -389,11 +422,15 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		switch {
 		case st.BackendState == ipn.NeedsMachineAuth.String():
 			n.to(Status{State: NeedsApproval, Err: errors.New("device approval is on for this tailnet, approve this device in the tailscale admin console")})
-		case st.BackendState == ipn.NeedsLogin.String() && n.self && n.joined && !n.loggingIn:
+		case st.BackendState == ipn.NeedsLogin.String() && n.self && (n.joined || !n.fresh) && !n.loggingIn:
 			// tailgate can't work without its own node, so it logs straight back in
 			n.loggingIn = true
-			return 0, n.login(ctx, lc, m.authKey)
-		case st.BackendState == ipn.NeedsLogin.String() && (n.joined || n.srv.AuthKey == ""):
+			var key string
+			if err := retry(ctx, &n.box, func() (err error) { key, err = m.api.authKey(ctx); return err }); err != nil {
+				return 0, err
+			}
+			return 0, m.login(ctx, n, lc, key)
+		case st.BackendState == ipn.NeedsLogin.String() && (n.joined || !n.fresh):
 			n.to(Status{State: LoggedOut, Err: errors.New("this node was logged out of the tailnet, probably because it was removed or its key expired")})
 		default:
 			n.to(Status{State: Starting})
@@ -413,28 +450,18 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		logoutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		logoutErr := lc.Logout(logoutCtx)
-		return 0, errors.Join(fmt.Errorf("TS_AUTHKEY isn't tagged %s, so this node was logged out and tailgate won't create any more nodes", tag), logoutErr)
+		return 0, errors.Join(fmt.Errorf("this node isn't tagged %s, so it was logged out and tailgate won't create any more nodes", tag), logoutErr)
 	}
 	if !n.joined {
 		n.joined = true
-		// a crash leaves funnel allowed in the node's state, and ListenFunnel never turns off what it didn't turn on
+		// a crash leaves funnel allowed and services advertised in the node's state, and
+		// ListenFunnel and ListenService never turn off what they didn't turn on
 		if err := lc.SetServeConfig(ctx, &ipn.ServeConfig{}); err != nil {
 			return 0, err
 		}
-	}
-
-	lock, err := lc.NetworkLockStatus(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if lock.Enabled && !lock.NodeKeySigned {
-		n.stopServing()
-		if n.self && !n.warnedLock && !strings.Contains(m.authKey, "--TL") {
-			slog.Warn(`tailnet lock is on and TS_AUTHKEY isn't signed, so each new node needs signing. Optional: sign the key once with "tailscale lock sign <key>" on a signing device to skip that`)
-			n.warnedLock = true
+		if _, err := lc.EditPrefs(ctx, &ipn.MaskedPrefs{AdvertiseServicesSet: true}); err != nil {
+			return 0, err
 		}
-		n.to(Status{State: NeedsSigning, SignCommand: fmt.Sprintf("tailscale lock sign %v %s", lock.NodeKey, lock.PublicKey.CLIString())})
-		return 0, nil
 	}
 
 	// tailscale renames clashing nodes to name-1 without telling us, and renaming it back
@@ -450,37 +477,34 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		n.to(Status{State: WrongName, Err: err})
 		return 0, nil
 	}
+	select {
+	case <-n.ready:
+	default:
+		close(n.ready)
+	}
+
+	lock, err := lc.NetworkLockStatus(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if lock.Enabled && !lock.NodeKeySigned {
+		n.stopServing()
+		n.to(Status{State: NeedsSigning, SignCommand: fmt.Sprintf("tailscale lock sign %v %s", lock.NodeKey, lock.PublicKey.CLIString())})
+		return 0, nil
+	}
 	if len(st.CertDomains) == 0 {
 		n.stopServing()
 		n.to(Status{State: CertPending, Err: errors.New("HTTPS certificates are off for this tailnet. Turn them on in the DNS page of the tailscale admin console")})
 		return 0, nil
 	}
 
-	if n.certFor != dnsName {
+	if n.cert.name != dnsName {
 		// the old name's listeners go now, the new name needs its own cert
 		n.stopServing()
-		n.certFor, n.certOK, n.certErr, n.certWait, n.certNext = dnsName, false, nil, 0, time.Time{}
+		n.cert = certState{name: dnsName, dir: n.srv.Dir}
 	}
-	if !time.Now().Before(n.certNext) {
-		if !n.certOK {
-			n.to(Status{State: CertPending, Err: n.certErr})
-		}
-		err := m.cert(ctx, lc, dnsName)
-		if ctx.Err() != nil {
-			return 0, nil
-		}
-		if err != nil {
-			n.certErr, n.certWait = err, min(max(2*n.certWait, time.Minute), time.Hour)
-			slog.Warn("fetching cert failed", "node", n.name, "error", err.Error(), "retry_in", n.certWait.String())
-		} else {
-			n.certOK, n.certErr, n.certWait = true, nil, 0
-		}
-		// a cert that works is checked hourly, tsnet renews it when it's close to expiring
-		n.certNext = time.Now().Add(cmp.Or(n.certWait, time.Hour))
-	}
-	if !n.certOK {
-		n.to(Status{State: CertPending, Err: n.certErr, RetryAt: n.certNext})
-		return time.Until(n.certNext), nil
+	if !m.renew(ctx, lc, &n.cert, &n.box) {
+		return time.Until(n.cert.next), nil
 	}
 
 	if n.hs == nil {
@@ -488,9 +512,7 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		if err != nil {
 			return 0, err
 		}
-		n.hs = server(dnsName, tailnet, func(c net.Conn) *conn {
-			return &conn{peer: sync.OnceValues(func() (*Peer, error) { return whois(lc, c.RemoteAddr().String()) })}
-		})
+		n.hs = server(dnsName, tailnet, tailnetConn(lc))
 		go n.hs.Serve(tls.NewListener(ln, n.tlsConfig(lc)))
 	}
 	var funnelErr error
@@ -508,19 +530,14 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		slog.Info("funnel off", "node", n.name)
 	}
 	switch {
-	case n.certErr != nil:
-		n.to(Status{State: CertPending, Err: n.certErr, RetryAt: n.certNext})
+	case n.cert.err != nil:
+		n.to(Status{State: CertPending, Err: n.cert.err, RetryAt: n.cert.next})
 	case funnelErr != nil:
 		n.to(Status{State: FunnelNotAllowed, Err: funnelErr})
 	default:
 		n.to(Status{State: Online})
 	}
-	select {
-	case <-n.ready:
-	default:
-		close(n.ready)
-	}
-	return time.Until(n.certNext), nil
+	return min(time.Until(n.cert.next), m.serveHosted(ctx, n, lc, st)), nil
 }
 
 // tsnet's ListenTLS and ListenFunnel leave out NextProtos, which would mean http/1.1 only
@@ -538,11 +555,54 @@ func (n *Node) stopServing() {
 		n.fs = nil
 		slog.Info("funnel off", "node", n.name)
 	}
+	for id, h := range n.serving {
+		h.close()
+		if !n.shuttingDown {
+			h.to(Status{State: Starting})
+		}
+		delete(n.serving, id)
+	}
+}
+
+// renew fetches c's cert when it's due, and is false while there's no working cert
+func (m *Manager) renew(ctx context.Context, lc *local.Client, c *certState, b *box) bool {
+	if !time.Now().Before(c.next) {
+		if !c.ok {
+			b.to(Status{State: CertPending, Err: c.err})
+		}
+		err := m.cert(ctx, lc, c.dir, c.name)
+		if ctx.Err() != nil {
+			return false
+		}
+		c.record(err, b)
+	}
+	if !c.ok {
+		b.to(Status{State: CertPending, Err: c.err, RetryAt: c.next})
+	}
+	return c.ok
+}
+
+// record notes how fetching the cert went and when to look again
+func (c *certState) record(err error, b *box) {
+	if err != nil {
+		c.err, c.wait = err, min(max(2*c.wait, time.Minute), time.Hour)
+		slog.Warn("fetching cert failed", b.key, b.name, "error", err.Error(), "retry_in", c.wait.String())
+	} else {
+		c.ok, c.err, c.wait = true, nil, 0
+	}
+	// a cert that works is checked hourly, tsnet renews it when it's close to expiring
+	c.next = time.Now().Add(cmp.Or(c.wait, time.Hour))
 }
 
 // cert gets a cert for name, one node at a time. After a failure the next node
 // waits a bit, so nodes retrying together don't all reach let's encrypt at once
-func (m *Manager) cert(ctx context.Context, lc *local.Client, name string) error {
+func (m *Manager) cert(ctx context.Context, lc *local.Client, dir, name string) error {
+	// tailscale answers from its cache while the cached cert is valid, renewing it in the
+	// background, so only a cert that has to come from let's encrypt waits its turn
+	if cached(dir, name) {
+		_, _, err := lc.CertPair(ctx, name)
+		return err
+	}
 	select {
 	case m.certSem <- struct{}{}:
 	case <-ctx.Done():
@@ -560,19 +620,33 @@ func (m *Manager) cert(ctx context.Context, lc *local.Client, name string) error
 	return err
 }
 
-// login logs the node in with the auth key. Its state dir keeps its machine key,
+// cached is whether tailscale has a valid cert for name in the node's state dir
+func cached(dir, name string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "certs", name+".crt"))
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return false
+	}
+	c, err := x509.ParseCertificate(block.Bytes)
+	return err == nil && time.Now().Before(c.NotAfter)
+}
+
+// login logs the node in with a new auth key. Its state dir keeps its machine key,
 // so it comes back as the same device if that still exists
-func (n *Node) login(ctx context.Context, lc *local.Client, authKey string) error {
+func (m *Manager) login(ctx context.Context, n *Node, lc *local.Client, key string) error {
 	n.mu.Lock()
 	n.loginErr = nil
 	n.mu.Unlock()
-	if err := lc.Start(ctx, ipn.Options{AuthKey: authKey}); err != nil {
+	if err := lc.Start(ctx, ipn.Options{AuthKey: key}); err != nil {
 		return err
 	}
 	return lc.StartLoginInteractive(ctx)
 }
 
-// Login logs a logged out service node back in
+// Login logs a logged out app node back in
 func (m *Manager) Login(ctx context.Context, id string) error {
 	n := m.Get(id)
 	if n == nil || n.Status().State != LoggedOut {
@@ -582,7 +656,18 @@ func (m *Manager) Login(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return n.login(ctx, lc, m.authKey)
+	key, err := m.api.authKey(ctx)
+	if err != nil {
+		return err
+	}
+	return m.login(ctx, n, lc, key)
+}
+
+// tailnetConn looks up which device a tailnet connection came from, once
+func tailnetConn(lc *local.Client) func(net.Conn) *conn {
+	return func(c net.Conn) *conn {
+		return &conn{peer: sync.OnceValues(func() (*Peer, error) { return whois(lc, c.RemoteAddr().String()) })}
+	}
 }
 
 type connKey struct{}
@@ -723,6 +808,21 @@ func (n *Node) Peers(ctx context.Context) ([]Peer, error) {
 	return peers, nil
 }
 
+// retry runs f until it works or ctx ends, so a tailscale api blip doesn't fail anything for good
+func retry(ctx context.Context, b *box, f func() error) error {
+	for wait := 5 * time.Second; ; wait = min(2*wait, 5*time.Minute) {
+		err := f()
+		if err == nil || ctx.Err() != nil {
+			return cmp.Or(ctx.Err(), err)
+		}
+		slog.Warn("tailscale api call failed", b.key, b.name, "error", err.Error(), "retry_in", wait.String())
+		b.to(Status{State: Starting, Err: err, RetryAt: time.Now().Add(wait)})
+		if !sleep(ctx, wait) {
+			return ctx.Err()
+		}
+	}
+}
+
 func sleep(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-time.After(d):
@@ -732,79 +832,111 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// Unused lists the state dirs in nodes/ whose name no container uses
+// Unused lists the state dirs in nodes/ of the ids not in inUse, which are the
+// apps that could use a node, and then the tailscale services tailgate
+// made that it doesn't serve, like svc:photos
 func (m *Manager) Unused(inUse map[string]bool) ([]string, error) {
+	var names []string
 	entries, err := os.ReadDir(m.nodesDir())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	var names []string
 	for _, e := range entries {
 		if e.IsDir() && !inUse[e.Name()] {
 			names = append(names, e.Name())
 		}
 	}
-	return names, nil
-}
-
-// RemoveUnused logs out each unused node and deletes its state dir. Logging
-// out leaves the device in the admin console and an auth key can't delete it,
-// so it returns the DNS names to delete by hand
-func (m *Manager) RemoveUnused(ctx context.Context, inUse map[string]bool) ([]string, error) {
-	m.mu.Lock()
-	all, err := m.Unused(inUse)
-	var names []string
-	for _, name := range all {
-		if m.nodes[name] == nil && !m.removing[name] {
-			m.removing[name] = true
+	hosted := m.hostedNames()
+	for _, name := range m.api.defined() {
+		if !hosted[name] {
 			names = append(names, name)
 		}
 	}
-	m.mu.Unlock()
-	if err != nil {
-		return nil, err
+	return names, nil
+}
+
+// Prune forgets the unused nodes and tailscale services that were deleted in the
+// tailscale admin console, dropping a node's state dir. It's true when it forgot any
+func (m *Manager) Prune(ctx context.Context, inUse map[string]bool) (bool, error) {
+	unused, err := m.Unused(inUse)
+	if err != nil || len(unused) == 0 {
+		return false, err
 	}
-	defer func() {
-		m.mu.Lock()
-		for _, name := range names {
-			delete(m.removing, name)
-		}
-		m.mu.Unlock()
-	}()
-	var removed []string
+	devices, err := m.api.devices(ctx)
+	if err != nil {
+		return false, err
+	}
+	// the tailgate node is always there, so an empty list is a mistake that would drop every unused node
+	if len(devices) == 0 {
+		return false, errors.New("the tailscale api listed no devices")
+	}
+	services, err := m.api.services(ctx)
+	if err != nil {
+		return false, err
+	}
+	pruned := false
 	var errs []error
-	for _, name := range names {
-		dnsName, err := remove(ctx, filepath.Join(m.nodesDir(), name), name)
+	for _, name := range unused {
+		if strings.HasPrefix(name, "svc:") {
+			if !services[name] {
+				m.api.forget(name)
+				slog.Info("tailscale service was deleted", "service", name)
+				pruned = true
+			}
+			continue
+		}
+		dir := filepath.Join(m.nodesDir(), name)
+		id, err := deviceID(dir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		slog.Info("removed unused node", "node", name, "dns_name", dnsName)
-		removed = append(removed, dnsName)
+		if devices[id] {
+			continue
+		}
+		m.mu.Lock()
+		// a node that started meanwhile uses the dir
+		if m.nodes[name] == nil {
+			err = os.RemoveAll(dir)
+		}
+		m.mu.Unlock()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		slog.Info("node's device was deleted, so its state was too", "node", name)
+		pruned = true
 	}
-	return removed, errors.Join(errs...)
+	return pruned, errors.Join(errs...)
 }
 
-func remove(ctx context.Context, dir, name string) (string, error) {
-	// no auth key, so a dir without usable state can't register a new device
-	srv := &tsnet.Server{Dir: dir, Hostname: name, UserLogf: func(string, ...any) {}}
-	defer srv.Close()
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	st, err := srv.Up(ctx)
+// deviceID reads the stable id of the device a node's state dir logs in as,
+// "" when it never joined
+func deviceID(dir string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	lc, err := srv.LocalClient()
-	if err != nil {
+	// the state file maps keys to json, and _profiles lists the logins with their device ids
+	var state map[ipn.StateKey][]byte
+	if err := json.Unmarshal(b, &state); err != nil {
 		return "", err
 	}
-	if err := lc.Logout(ctx); err != nil {
+	if state[ipn.KnownProfilesStateKey] == nil {
+		return "", nil
+	}
+	var profiles map[ipn.ProfileID]ipn.LoginProfile
+	if err := json.Unmarshal(state[ipn.KnownProfilesStateKey], &profiles); err != nil {
 		return "", err
 	}
-	srv.Close()
-	return strings.TrimSuffix(st.Self.DNSName, "."), os.RemoveAll(dir)
+	// _current-profile names the profile's own state key
+	for _, p := range profiles {
+		if p.Key == ipn.StateKey(state[ipn.CurrentProfileStateKey]) {
+			return string(p.NodeID), nil
+		}
+	}
+	return "", errors.New("the node's state has no current profile")
 }

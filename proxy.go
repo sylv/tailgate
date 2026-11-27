@@ -11,14 +11,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sylv/tailgate/app"
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
-	"github.com/sylv/tailgate/service"
 )
 
 const callbackPath = "/.tailgate/callback"
 
-type serviceKey struct{}
+type appKey struct{}
 
 func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 	transport := &http.Transport{
@@ -31,7 +31,7 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 	return transport, &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(r *httputil.ProxyRequest) {
-			s := r.In.Context().Value(serviceKey{}).(service.Service)
+			s := r.In.Context().Value(appKey{}).(app.App)
 			r.SetURL(&url.URL{Scheme: "http", Host: net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))})
 			r.Out.Host = r.In.Host
 			requestOf(r.In.Context()).rules.ApplyRequest(r.Out.Header)
@@ -44,7 +44,7 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 		ModifyResponse: func(res *http.Response) error {
 			// tailgate already set its own on the response
 			res.Header.Del(requestIDHeader)
-			if res.Request.Context().Value(serviceKey{}).(service.Service).Noindex {
+			if res.Request.Context().Value(appKey{}).(app.App).Noindex {
 				res.Header.Set("X-Robots-Tag", noindex)
 			}
 			requestOf(res.Request.Context()).rules.ApplyResponse(res.Header)
@@ -52,24 +52,24 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			slog.Warn("upstream request failed", "request_id", requestOf(r.Context()).id, "host", r.Host, "error", err.Error())
-			plain(w, r, http.StatusBadGateway, "upstream service is offline")
+			slog.Warn("app request failed", "request_id", requestOf(r.Context()).id, "host", r.Host, "error", err.Error())
+			plain(w, r, http.StatusBadGateway, "app is offline")
 		},
 	}
 }
 
-// serviceHandler serves a service's host. Pre-auth rules run first, then
+// appHandler serves an app's host. Pre-auth rules run first, then
 // the callback and the login and access checks, then post-auth rules
-func (g *gate) serviceHandler(name string) http.Handler {
+func (g *gate) appHandler(name string) http.Handler {
 	return requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s, ok := g.route(name)
 		if !ok {
-			plain(w, r, http.StatusBadGateway, "service unavailable")
+			plain(w, r, http.StatusBadGateway, "app unavailable")
 			return
 		}
 		set, err := g.ruleSet()
 		if err != nil {
-			plain(w, r, http.StatusServiceUnavailable, "service unavailable")
+			plain(w, r, http.StatusServiceUnavailable, "app unavailable")
 			return
 		}
 		var id *identity
@@ -124,7 +124,7 @@ func (g *gate) authorized(w http.ResponseWriter, r *http.Request, name string, i
 		return false
 	}
 	if !id.user.HasAccess(name) {
-		plain(w, r, http.StatusForbidden, "you do not have access to this service")
+		plain(w, r, http.StatusForbidden, "you do not have access to this app")
 		return false
 	}
 	return true
@@ -154,14 +154,14 @@ func ended(w http.ResponseWriter, r *http.Request, err error, res *rules.Result)
 }
 
 // ruleRequest is the values rules see for a request
-func (g *gate) ruleRequest(r *http.Request, s service.Service) (rules.Request, error) {
+func (g *gate) ruleRequest(r *http.Request, s app.App) (rules.Request, error) {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	// rules see the headers the app will, so they can't copy a credential somewhere it isn't stripped from
 	seen := &http.Request{Header: r.Header.Clone()}
 	stripCredentials(seen.Header)
 	req := rules.Request{
 		Ingress:   node.Ingress(r.Context()),
-		Service:   s,
+		App:       s,
 		Host:      r.Host,
 		Method:    r.Method,
 		Path:      r.URL.Path,
@@ -193,17 +193,17 @@ func (g *gate) ruleRequest(r *http.Request, s service.Service) (rules.Request, e
 	return req, nil
 }
 
-func (g *gate) proxy(w http.ResponseWriter, r *http.Request, s service.Service) {
+func (g *gate) proxy(w http.ResponseWriter, r *http.Request, s app.App) {
 	if s.Addr == "" {
-		plain(w, r, http.StatusBadGateway, "upstream service is offline")
+		plain(w, r, http.StatusBadGateway, "app is offline")
 		return
 	}
-	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serviceKey{}, s)))
+	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), appKey{}, s)))
 }
 
 func (g *gate) callback(w http.ResponseWriter, r *http.Request, name string) {
 	c, ok := g.codes.take(r.URL.Query().Get("code"))
-	if !ok || c.service != name {
+	if !ok || c.app != name {
 		plain(w, r, http.StatusNotFound, "404 page not found")
 		return
 	}

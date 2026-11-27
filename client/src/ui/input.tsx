@@ -9,16 +9,19 @@ export const FIELD =
   "hover:border-line-strong focus-visible:border-brand-bright focus-visible:ring-1 focus-visible:ring-brand-bright focus-visible:ring-inset " +
   "aria-invalid:border-danger aria-invalid:ring-1 aria-invalid:ring-danger disabled:opacity-45";
 
+// ios zooms into a field with text under 16px when it's focused
+const ZOOM = "text-sm pointer-coarse:text-base";
+
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
   ({ className, ...props }, ref) => (
-    <input ref={ref} className={cn(FIELD, "h-8 px-3 text-sm", className)} {...props} />
+    <input ref={ref} className={cn(FIELD, "h-8 px-3", ZOOM, className)} {...props} />
   ),
 );
 Input.displayName = "Input";
 
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
   ({ className, ...props }, ref) => (
-    <textarea ref={ref} className={cn(FIELD, "min-h-20 px-3 py-2 text-sm", className)} {...props} />
+    <textarea ref={ref} className={cn(FIELD, "min-h-20 px-3 py-2", ZOOM, className)} {...props} />
   ),
 );
 Textarea.displayName = "Textarea";

@@ -6,8 +6,8 @@ export interface User {
   note: string;
   email: string;
   admin: boolean;
-  allServices: boolean;
-  services: string[];
+  allApps: boolean;
+  apps: string[];
 }
 
 export interface Key {
@@ -32,8 +32,9 @@ export interface Me {
   user: User | null;
   via?: "session" | "key" | "tailnet";
   login?: string;
-  services: { name: string; url: string }[];
-  // the service from ?to=, and why it can't be signed in to
+  // funnel is whether an app can be opened from the internet
+  apps: { name: string; url: string; funnel: boolean }[];
+  // the app from ?to=, and why it can't be signed in to
   target?: string;
   error?: string;
   ingress: "tailnet" | "funnel";
@@ -51,9 +52,11 @@ export interface NodeInfo {
   nodeError?: string;
   // when a cert is tried again, unix seconds
   retryAt?: number;
+  // a tailscale service on the tailgate node, instead of its own node
+  tailscaleService?: boolean;
 }
 
-export interface Service extends NodeInfo {
+export interface App extends NodeInfo {
   id: string;
   hostname: string;
   container: string;
@@ -61,14 +64,14 @@ export interface Service extends NodeInfo {
   funnel: boolean;
   dangerouslyDisableAuth: boolean;
   // where requests are proxied, missing while the container isn't running
-  upstream?: string;
+  address?: string;
   error?: string;
 }
 
-export interface Services {
+export interface Apps {
   tailgate: NodeInfo;
   problems: string[];
-  services: Service[];
+  apps: App[];
   unused: string[];
 }
 
@@ -130,15 +133,15 @@ export interface SchemaValue {
 
 export interface Schema {
   values: SchemaValue[];
-  // the routed services' ids and hostnames
-  services: string[];
+  // the routed apps' ids and hostnames
+  apps: string[];
   hostnames: string[];
 }
 
 export interface OIDCClient {
   id: string;
   name: string;
-  service: string;
+  app: string;
   redirectURIs: string[];
   createdAt: number;
 }

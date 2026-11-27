@@ -89,7 +89,7 @@ func acceptedEncodings(header string) map[string]bool {
 	return accepted
 }
 
-// encode compresses body as it's read. Every read from the upstream is
+// encode compresses body as it's read. Every read from the app is
 // flushed, so streamed responses still arrive as they're sent
 func encode(body io.ReadCloser, pool *sync.Pool) io.ReadCloser {
 	pr, pw := io.Pipe()

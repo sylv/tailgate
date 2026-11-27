@@ -133,8 +133,8 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
         title="Rules"
         description={
           <>
-            Every service runs these from the top, and the first block or redirect ends the request.
-            Conditions and values are{" "}
+            Every app runs these from the top, and the first block or redirect ends the request. Conditions
+            and values are{" "}
             <a
               href="https://expr-lang.org/docs/language-definition"
               className="text-fg underline-offset-2 hover:underline"
@@ -146,12 +146,12 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
         }
       />
       <Note tone="info" className="mb-8">
-        Over Funnel, rules before sign-in also run on tailgate's own pages, where service.id is "". On the
-        tailnet they don't, so a bad rule can't lock you out of this page
+        Over Funnel, rules before sign-in also run on tailgate's own pages, where app.id is "". On the tailnet
+        they don't, so a bad rule can't lock you out of this page
       </Note>
       {saved.error && (
         <Note tone="danger" className="mb-8">
-          The saved rules can't be loaded, so every request to a service is blocked until they're fixed.{" "}
+          The saved rules can't be loaded, so every request to an app is blocked until they're fixed.{" "}
           {saved.error}
         </Note>
       )}
@@ -161,19 +161,19 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
         <Stage title="Sign in" description="Sign-in rules can't be edited" className="mt-8" />
         <LockedRule
           name="Login"
-          condition="!user.signedIn && !service.dangerouslyDisableAuth"
+          condition="!user.signedIn && !app.dangerouslyDisableAuth"
           effect="login"
           values={values}
         />
         <LockedRule
           name="Access"
-          condition="!service.dangerouslyDisableAuth && !user.hasAccess"
-          effect={`block "you do not have access to this service"`}
+          condition="!app.dangerouslyDisableAuth && !user.hasAccess"
+          effect={`block "you do not have access to this app"`}
           values={values}
         />
         <Stage title="Signed in" className="mt-8" />
         {section("post")}
-        <Stage title="On to the service" className="mt-8" />
+        <Stage title="On to the app" className="mt-8" />
       </Flow>
       {(dirty || saveError) && (
         // as wide as the page's content, so it lines up with what's above it

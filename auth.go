@@ -28,15 +28,18 @@ type identity struct {
 }
 
 // identify reads a request's credentials in order and returns nil when there
-// are none. host is the service, or "" for the tailgate node, which doesn't
+// are none. host is the app, or "" for the tailgate node, which doesn't
 // take the header keys apps use
 func (g *gate) identify(w http.ResponseWriter, r *http.Request, host string) (*identity, error) {
-	id, err := g.credentials(w, r, host)
-	if id != nil {
-		req := requestOf(r.Context())
-		req.user, req.via = id.user.Name, id.via
+	req := requestOf(r.Context())
+	if !req.identified {
+		req.ident, req.identErr = g.credentials(w, r, host)
+		req.identified = true
+		if req.ident != nil {
+			req.user, req.via = req.ident.user.Name, req.ident.via
+		}
 	}
-	return id, err
+	return req.ident, req.identErr
 }
 
 func (g *gate) credentials(w http.ResponseWriter, r *http.Request, host string) (*identity, error) {
@@ -127,9 +130,9 @@ func navigation(r *http.Request) bool {
 	return r.Header.Get("Sec-Fetch-Mode") == "navigate" || r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// code is a single use code that swaps a tailgate node session for a session on a service
+// code is a single use code that swaps a tailgate node session for a session on an app
 type code struct {
-	service, path         string
+	app, path             string
 	userID, keyID, parent string
 }
 

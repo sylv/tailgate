@@ -14,7 +14,7 @@ import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu";
 
-const blank: User = { id: "", name: "", note: "", email: "", admin: false, allServices: false, services: [] };
+const blank: User = { id: "", name: "", note: "", email: "", admin: false, allApps: false, apps: [] };
 
 const Back = () => (
   <Button variant="link" size="sm" icon={<ArrowLeftIcon />} asChild className="mb-3">
@@ -58,8 +58,8 @@ function ExistingUser({ id }: { id: string }) {
   if (!users) return null;
   const user = users.find((u) => u.id === id);
   if (!user) return <ErrorText>That user doesn't exist anymore</ErrorText>;
-  const { id: uid, name, note, email, admin, allServices, services } = user;
-  const profile: User = { id: uid, name, note, email, admin, allServices, services };
+  const { id: uid, name, note, email, admin, allApps, apps } = user;
+  const profile: User = { id: uid, name, note, email, admin, allApps, apps };
 
   return (
     <>

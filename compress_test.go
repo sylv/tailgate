@@ -98,7 +98,7 @@ func TestCompressStreams(t *testing.T) {
 		}
 		got := make([]byte, len(chunk))
 		if _, err := io.ReadFull(d, got); err != nil || !bytes.Equal(got, []byte(chunk)) {
-			t.Fatalf("got %q, %v before the upstream finished", got, err)
+			t.Fatalf("got %q, %v before the app finished", got, err)
 		}
 	}
 	pw.Close()

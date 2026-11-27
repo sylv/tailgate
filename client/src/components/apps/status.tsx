@@ -1,6 +1,6 @@
 import { ExclamationMarkIcon, HourglassSimpleIcon, PauseIcon } from "@phosphor-icons/react";
 import type { FC } from "react";
-import type { NodeInfo, Service, Services } from "../../api";
+import type { NodeInfo, App, Apps } from "../../api";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../../ui/tooltip";
 
@@ -26,9 +26,9 @@ const toneOf = (n: NodeInfo): Tone => {
     case "auth key invalid":
       return "danger";
     case "cert pending":
-      return n.nodeError ? "warning" : "idle";
+      return "warning";
   }
-  // starting and cert pending are on their way
+  // starting is on its way
   return n.nodeError ? "danger" : "idle";
 };
 
@@ -36,26 +36,28 @@ const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export const nodeStatus = (n: NodeInfo): Status => {
   const tone = toneOf(n);
+  // a cert on its way is yellow but needs nothing doing, so it waits instead of asking for attention
+  const waiting = (tone === "idle" && !!n.state) || (n.state === "cert pending" && !n.nodeError);
   return {
     tone,
-    icon: tone === "warning" || tone === "danger" ? "alert" : tone === "idle" && n.state ? "wait" : "none",
+    icon: waiting ? "wait" : tone === "warning" || tone === "danger" ? "alert" : "none",
     label: sentence(n.state || "no node"),
   };
 };
 
-export const serviceStatus = (s: Service): Status => {
+export const appStatus = (s: App): Status => {
   if (s.error) return { tone: "danger", icon: "alert", label: "Its labels have errors" };
   const status = nodeStatus(s);
   if (status.icon === "alert") return status;
-  if (!s.upstream) return { tone: "idle", icon: "pause", label: "Container stopped" };
+  if (!s.address) return { tone: "idle", icon: "pause", label: "Container stopped" };
   return status;
 };
 
-export const needsAttention = (s: Services) =>
+export const needsAttention = (s: Apps) =>
   s.problems.length > 0 ||
   s.unused.length > 0 ||
   nodeStatus(s.tailgate).icon === "alert" ||
-  s.services.some((x) => serviceStatus(x).icon === "alert");
+  s.apps.some((x) => appStatus(x).icon === "alert");
 
 export const toneText: Record<Tone, string> = {
   ok: "text-success",

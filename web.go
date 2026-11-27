@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -15,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sylv/tailgate/app"
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
-	"github.com/sylv/tailgate/service"
 	"github.com/sylv/tailgate/store"
 )
 
@@ -53,7 +52,7 @@ func (g *gate) web(funnel bool) http.Handler {
 		g.tailnetOnly(mux)
 	}
 
-	// every service shares the tailnet's site, so SameSite cookies don't stop one
+	// every app shares the tailnet's site, so SameSite cookies don't stop one
 	// from posting here. this refuses cross origin writes to every route, while
 	// apps swapping oidc codes send no origin and pass
 	h := http.NewCrossOriginProtection().Handler(mux)
@@ -70,7 +69,7 @@ func (g *gate) web(funnel bool) http.Handler {
 }
 
 // selfRules answers the trace and, over funnel, runs the pre-auth rules on
-// tailgate's own pages like a service. the tailnet skips them so a bad rule
+// tailgate's own pages like an app. the tailnet skips them so a bad rule
 // can't lock admins out of the page that fixes it. It's false once the request
 // is answered
 func (g *gate) selfRules(w http.ResponseWriter, r *http.Request) bool {
@@ -81,7 +80,7 @@ func (g *gate) selfRules(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	hostname, _, _ := strings.Cut(g.hosts(""), ".")
-	req, err := g.ruleRequest(r, service.Service{Hostname: hostname, Funnel: true, Noindex: true})
+	req, err := g.ruleRequest(r, app.App{Hostname: hostname, Funnel: true, Noindex: true})
 	if err != nil {
 		slog.Error("reading the request for rules failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
 		plain(w, r, http.StatusInternalServerError, "internal server error")
@@ -93,7 +92,7 @@ func (g *gate) selfRules(w http.ResponseWriter, r *http.Request) bool {
 	}
 	set, err := g.ruleSet()
 	if err != nil {
-		plain(w, r, http.StatusServiceUnavailable, "service unavailable")
+		plain(w, r, http.StatusServiceUnavailable, "tailgate is unavailable")
 		return false
 	}
 	res := requestOf(r.Context()).rules
@@ -127,9 +126,8 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 		return nil, g.db.UnlinkLogin(id)
 	}))
 	mux.HandleFunc("GET /api/admin/logins", g.api(true, g.tailnetLogins))
-	mux.HandleFunc("GET /api/admin/services", g.api(true, g.adminServices))
-	mux.HandleFunc("POST /api/admin/remove-unused-nodes", g.api(true, g.removeUnused))
-	mux.HandleFunc("POST /api/admin/services/{name}/login", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
+	mux.HandleFunc("GET /api/admin/apps", g.api(true, g.adminApps))
+	mux.HandleFunc("POST /api/admin/apps/{name}/login", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
 		return nil, g.nodes.Login(r.Context(), r.PathValue("name"))
 	}))
 	mux.HandleFunc("GET /api/admin/rules", g.api(true, g.listRules))
@@ -155,7 +153,7 @@ func (g *gate) page(w http.ResponseWriter, r *http.Request) {
 }
 
 // login skips the login page when the visitor is already signed in and can
-// reach the service they came from
+// reach the app they came from
 func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 	id, err := g.identify(w, r, "")
 	if err != nil {
@@ -169,7 +167,7 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id != nil {
-		if t, err := g.target(to); err == nil && id.user.HasAccess(t.service) {
+		if t, err := g.target(to); err == nil && id.user.HasAccess(t.app) {
 			redirect(w, g.continueURL(id, t))
 			return
 		}
@@ -178,29 +176,29 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 }
 
 type target struct {
-	service, host, path string
+	app, host, path string
 }
 
-// target reads ?to=, a service name and a path. The URL is built from the
-// service's own host so it can't point anywhere else
+// target reads ?to=, an app name and a path. The URL is built from the
+// app's own host so it can't point anywhere else
 func (g *gate) target(to string) (target, error) {
 	name, path, _ := strings.Cut(to, ":")
 	_, ok := g.route(name)
 	host := g.hosts(name)
 	// a path starting with // or /\ is another host to a browser. one error for
-	// everything, so funnel visitors can't use it to find out which services exist
+	// everything, so funnel visitors can't use it to find out which apps exist
 	if !ok || host == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
 		return target{}, errors.New("The link you followed is broken")
 	}
-	return target{service: name, host: host, path: path}, nil
+	return target{app: name, host: host, path: path}, nil
 }
 
 func (g *gate) continueURL(id *identity, t target) string {
 	if id.via == "tailnet" {
-		// the service signs a linked login in by itself
+		// the app signs a linked login in by itself
 		return "https://" + t.host + t.path
 	}
-	c := g.codes.add(code{service: t.service, path: t.path, userID: id.user.ID, keyID: id.keyID, parent: id.session}, time.Minute)
+	c := g.codes.add(code{app: t.app, path: t.path, userID: id.user.ID, keyID: id.keyID, parent: id.session}, time.Minute)
 	return "https://" + t.host + callbackPath + "?code=" + c
 }
 
@@ -259,20 +257,22 @@ func decode(r *http.Request, v any) error {
 type link struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
+	// Funnel is whether it can be opened from the internet
+	Funnel bool `json:"funnel"`
 }
 
 func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, error) {
 	res := struct {
-		User     *store.User `json:"user"`
-		Via      string      `json:"via,omitempty"`
-		Login    string      `json:"login,omitempty"`
-		Services []link      `json:"services"`
-		Target   string      `json:"target,omitempty"`
-		Error    string      `json:"error,omitempty"`
+		User   *store.User `json:"user"`
+		Via    string      `json:"via,omitempty"`
+		Login  string      `json:"login,omitempty"`
+		Apps   []link      `json:"apps"`
+		Target string      `json:"target,omitempty"`
+		Error  string      `json:"error,omitempty"`
 		// Ingress and RequestID are for the page footer, so a visitor can say how they came and which request it was
 		Ingress   string `json:"ingress"`
 		RequestID string `json:"requestId"`
-	}{Services: []link{}, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
+	}{Apps: []link{}, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
 	// client is the oidc client the login page is signing in to
 	var client *store.OIDCClient
 	if clientID := r.URL.Query().Get("client"); clientID != "" {
@@ -280,11 +280,11 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		if client, err = g.db.OIDCClient(clientID); err != nil {
 			return nil, err
 		}
-		res.Target = g.hostname(client.Service)
+		res.Target = g.hostname(client.App)
 	}
 	if to := r.URL.Query().Get("to"); to != "" {
 		t, err := g.target(to)
-		res.Target = g.hostname(t.service)
+		res.Target = g.hostname(t.app)
 		if err != nil {
 			res.Error = err.Error()
 		}
@@ -293,16 +293,16 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		return res, nil
 	}
 	res.User, res.Via, res.Login = id.user, id.via, id.login
-	if client != nil && id.user.HasAccess(client.Service) && id.user.Email == "" {
-		res.Error = id.user.Name + " has no email, which signing in to " + g.hostname(client.Service) + " needs. Ask an admin to add one"
+	if client != nil && id.user.HasAccess(client.App) && id.user.Email == "" {
+		res.Error = id.user.Name + " has no email, which signing in to " + g.hostname(client.App) + " needs. Ask an admin to add one"
 	}
 	for _, s := range g.routed() {
 		if id.user.HasAccess(s.ID) {
-			l := link{Name: s.Hostname}
+			l := link{Name: s.Hostname, Funnel: s.Funnel}
 			if host := g.hosts(s.ID); host != "" {
 				l.URL = "https://" + host
 			}
-			res.Services = append(res.Services, l)
+			res.Apps = append(res.Apps, l)
 		}
 	}
 	return res, nil
@@ -359,7 +359,7 @@ func (g *gate) setup(_ http.ResponseWriter, r *http.Request, _ *identity) (any, 
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("setup is done, starting services", "admin", name)
+	slog.Info("setup is done, starting apps", "admin", name)
 	g.refresh()
 	return map[string]string{"key": key}, nil
 }
@@ -446,7 +446,7 @@ func (g *gate) tailnetLogins(_ http.ResponseWriter, r *http.Request, _ *identity
 	return logins, nil
 }
 
-func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any, error) {
+func (g *gate) adminApps(http.ResponseWriter, *http.Request, *identity) (any, error) {
 	type nodeInfo struct {
 		State       string `json:"state,omitempty"`
 		URL         string `json:"url,omitempty"`
@@ -454,6 +454,8 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		NodeError   string `json:"nodeError,omitempty"`
 		// RetryAt is when a cert is tried again, in unix seconds
 		RetryAt int64 `json:"retryAt,omitempty"`
+		// TailscaleService is set for a tailscale service on the tailgate node, instead of its own node
+		TailscaleService bool `json:"tailscaleService,omitempty"`
 	}
 	type svc struct {
 		nodeInfo
@@ -463,12 +465,12 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		Port                   int    `json:"port"`
 		Funnel                 bool   `json:"funnel"`
 		DangerouslyDisableAuth bool   `json:"dangerouslyDisableAuth"`
-		// upstream is where requests are proxied, "" while the container isn't running
-		Upstream string `json:"upstream,omitempty"`
-		Error    string `json:"error,omitempty"`
+		// Address is where requests are proxied, "" while the container isn't running
+		Address string `json:"address,omitempty"`
+		Error   string `json:"error,omitempty"`
 	}
 	nodeOf := func(st node.Status) nodeInfo {
-		n := nodeInfo{State: string(st.State), SignCommand: st.SignCommand}
+		n := nodeInfo{State: string(st.State), SignCommand: st.SignCommand, TailscaleService: st.Service}
 		if st.DNSName != "" {
 			n.URL = "https://" + st.DNSName
 		}
@@ -480,13 +482,13 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		}
 		return n
 	}
-	services, unused, dockerErr := g.snapshot()
+	apps, unused, dockerErr := g.snapshot()
 	res := struct {
 		Tailgate nodeInfo `json:"tailgate"`
 		Problems []string `json:"problems"`
-		Services []svc    `json:"services"`
+		Apps     []svc    `json:"apps"`
 		Unused   []string `json:"unused"`
-	}{Problems: []string{}, Services: []svc{}, Unused: append([]string{}, unused...)}
+	}{Problems: []string{}, Apps: []svc{}, Unused: append([]string{}, unused...)}
 	if self := g.nodes.Self(); self != nil {
 		res.Tailgate = nodeOf(self.Status())
 	}
@@ -498,19 +500,19 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 	if dockerErr != nil {
 		res.Problems = append(res.Problems, "Docker can't be read, so changes to containers aren't picked up: "+dockerErr.Error())
 	}
-	for _, s := range services {
+	for _, s := range apps {
 		v := svc{ID: s.ID, Hostname: s.Hostname, Container: s.Container, Port: s.Port, Funnel: s.Funnel, DangerouslyDisableAuth: s.DangerouslyDisableAuth}
 		if s.Addr != "" {
-			v.Upstream = "http://" + net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))
+			v.Address = "http://" + net.JoinHostPort(s.Addr, strconv.Itoa(s.Port))
 		}
 		if s.Err != nil {
 			v.Error = s.Err.Error()
-		} else if st, ok := g.nodeStatus(s.ID); ok {
+		} else if st, ok := g.nodes.Status(s.ID); ok {
 			v.nodeInfo = nodeOf(st)
 		}
-		res.Services = append(res.Services, v)
+		res.Apps = append(res.Apps, v)
 	}
-	// errors first, then services anyone on the internet can use
+	// errors first, then apps anyone on the internet can use
 	rank := func(s svc) int {
 		switch {
 		case s.Error != "":
@@ -520,16 +522,8 @@ func (g *gate) adminServices(http.ResponseWriter, *http.Request, *identity) (any
 		}
 		return 2
 	}
-	slices.SortStableFunc(res.Services, func(a, b svc) int { return rank(a) - rank(b) })
+	slices.SortStableFunc(res.Apps, func(a, b svc) int { return rank(a) - rank(b) })
 	return res, nil
-}
-
-func (g *gate) removeUnused(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
-	// a container that got its labels meanwhile wasn't started, so look again
-	defer g.refresh()
-	// finish even if the admin closes the page, or nodes would be half removed
-	removed, err := g.nodes.RemoveUnused(context.WithoutCancel(r.Context()), g.inUse())
-	return map[string][]string{"removed": append([]string{}, removed...)}, err
 }
 
 type ruleList struct {
@@ -595,7 +589,7 @@ func (g *gate) ruleSchema(http.ResponseWriter, *http.Request, *identity) (any, e
 	for _, s := range g.routed() {
 		ids, hostnames = append(ids, s.ID), append(hostnames, s.Hostname)
 	}
-	return map[string]any{"values": rules.Schema(), "services": ids, "hostnames": hostnames}, nil
+	return map[string]any{"values": rules.Schema(), "apps": ids, "hostnames": hostnames}, nil
 }
 
 func (g *gate) oidcClients(http.ResponseWriter, *http.Request, *identity) (any, error) {
@@ -611,9 +605,9 @@ func (g *gate) saveOIDCClient(_ http.ResponseWriter, r *http.Request, _ *identit
 		return nil, err
 	}
 	c.ID = r.PathValue("id")
-	c.Name, c.Service = strings.TrimSpace(c.Name), strings.TrimSpace(c.Service)
-	if c.Name == "" || c.Service == "" {
-		return nil, badRequest("A name and a service are required")
+	c.Name, c.App = strings.TrimSpace(c.Name), strings.TrimSpace(c.App)
+	if c.Name == "" || c.App == "" {
+		return nil, badRequest("A name and an app are required")
 	}
 	if len(c.RedirectURIs) == 0 {
 		return nil, badRequest("At least one redirect URI is required")

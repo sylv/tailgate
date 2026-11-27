@@ -89,7 +89,7 @@ interface Item {
 }
 
 // completions for the word or string before the caret. Inside a string after
-// service.id, service.hostname, ingress or country it suggests the values those can have
+// app.id, app.hostname, ingress or country it suggests the values those can have
 function complete(text: string, caret: number, schema: Schema, section: string) {
   const before = text.slice(0, caret);
   const tokens = [...before.matchAll(tokenRe)];
@@ -100,8 +100,8 @@ function complete(text: string, caret: number, schema: Schema, section: string) 
     const prefix = before.slice(from).toLowerCase();
     const ident = /([\w.]+)\s*(?:==|!=|(?:not\s+)?in\s*\[[^\]]*?)\s*$/.exec(before.slice(0, last.index))?.[1];
     const options: Record<string, [string, string][]> = {
-      "service.id": schema.services.map((s) => [s, "service"]),
-      "service.hostname": schema.hostnames.map((s) => [s, "service"]),
+      "app.id": schema.apps.map((s) => [s, "app"]),
+      "app.hostname": schema.hostnames.map((s) => [s, "app"]),
       ingress: [
         ["tailnet", ""],
         ["funnel", ""],

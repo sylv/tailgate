@@ -18,7 +18,7 @@ import (
 
 func TestOIDC(t *testing.T) {
 	tg := newTestGate(t)
-	clientID, secret, _ := tg.db.SaveOIDCClient(store.OIDCClient{Name: "photos", Service: "photos", RedirectURIs: []string{"https://photos.ts.net/auth/callback", "app.photos:///cb"}})
+	clientID, secret, _ := tg.db.SaveOIDCClient(store.OIDCClient{Name: "photos", App: "photos", RedirectURIs: []string{"https://photos.ts.net/auth/callback", "app.photos:///cb"}})
 	userID, _ := tg.db.UserIDByName("ezra")
 	_, keyID, _ := tg.db.KeyUser(tg.key)
 	session, _ := tg.db.CreateSession(userID, keyID, "", "")
@@ -102,7 +102,7 @@ func TestOIDC(t *testing.T) {
 		t.Errorf("userinfo got %d %s", info.Code, info.Body)
 	}
 	// apps need an email, so without one there's no code, and the login page says why
-	tg.db.SaveUser(store.User{ID: userID, Name: "ezra", Services: []string{"photos"}})
+	tg.db.SaveUser(store.User{ID: userID, Name: "ezra", Apps: []string{"photos"}})
 	if rec := authorize("app.photos:///cb", clientID, signedIn); rec.Header().Get("Location") != "" {
 		t.Errorf("no email got a redirect to %q", rec.Header().Get("Location"))
 	}
@@ -114,7 +114,7 @@ func TestOIDC(t *testing.T) {
 		t.Errorf("userinfo without an email got %d", info.Code)
 	}
 
-	// losing access to the service ends the token
+	// losing access to the app ends the token
 	tg.db.SaveUser(store.User{ID: userID, Name: "ezra", Email: "ezra@example.com"})
 	if info := do(tg.web, "GET", "https://tailgate.ts.net/oidc/userinfo", http.Header{"Authorization": {"Bearer " + res.AccessToken}}); info.Code != http.StatusUnauthorized {
 		t.Errorf("userinfo without access got %d", info.Code)
@@ -138,7 +138,7 @@ func TestOIDCRedirectURIs(t *testing.T) {
 		"/cb":                          false,
 		"https://photos.ts.net/cb#x":   false,
 	} {
-		req := httptest.NewRequest("POST", "https://tailgate.ts.net/api/admin/oidc-clients", strings.NewReader(`{"name":"p","service":"photos","redirectURIs":["`+uri+`"]}`))
+		req := httptest.NewRequest("POST", "https://tailgate.ts.net/api/admin/oidc-clients", strings.NewReader(`{"name":"p","app":"photos","redirectURIs":["`+uri+`"]}`))
 		req.Header = http.Header{"Origin": {"https://tailgate.ts.net"}, "Content-Type": {"application/json"}, "Cookie": {cookieName + "=" + session}}
 		rec := httptest.NewRecorder()
 		tg.web.ServeHTTP(rec, req)

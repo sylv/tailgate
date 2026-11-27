@@ -199,7 +199,7 @@ func (g *gate) userinfo(w http.ResponseWriter, r *http.Request) {
 // make accounts by email and fail in their own confusing way without one, so
 // an email is required
 func canSignIn(u *store.User, c *store.OIDCClient) bool {
-	return u.HasAccess(c.Service) && u.Email != ""
+	return u.HasAccess(c.App) && u.Email != ""
 }
 
 func userClaims(u *store.User) map[string]any {

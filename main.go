@@ -20,11 +20,11 @@ import (
 	"time"
 
 	"github.com/lmittmann/tint"
+	"github.com/sylv/tailgate/app"
 	"github.com/sylv/tailgate/docker"
 	"github.com/sylv/tailgate/geo"
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
-	"github.com/sylv/tailgate/service"
 	"github.com/sylv/tailgate/store"
 )
 
@@ -91,12 +91,14 @@ func withUser(name string, fn func(*store.Store, string) error) error {
 
 func run() error {
 	slog.Info("starting tailgate", "version", version)
-	authKey := os.Getenv("TS_AUTHKEY")
-	if authKey == "" {
-		return errors.New("TS_AUTHKEY is required")
+	secret := os.Getenv("TS_CLIENT_SECRET")
+	if secret == "" {
+		return errors.New("TS_CLIENT_SECRET is required, an oauth client secret. TS_AUTHKEY isn't used anymore")
 	}
-	// tsnet falls back to TS_AUTHKEY itself, which would let removing unused nodes register new ones
-	os.Unsetenv("TS_AUTHKEY")
+	// tsnet falls back to these itself, which would let a removed node log back in
+	for _, env := range []string{"TS_CLIENT_SECRET", "TS_CLIENT_ID", "TS_AUTHKEY", "TS_AUTH_KEY"} {
+		os.Unsetenv(env)
+	}
 	hostname := cmp.Or(os.Getenv("TAILGATE_HOSTNAME"), "tailgate")
 	dc, err := docker.New(cmp.Or(os.Getenv("DOCKER_HOST"), "unix:///var/run/docker.sock"))
 	if err != nil {
@@ -114,7 +116,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	nodes := node.NewManager(dataDir(), authKey)
+	api, err := node.NewAPI(ctx, secret)
+	if err != nil {
+		return err
+	}
+	nodes := node.NewManager(dataDir(), api)
 	defer nodes.Close()
 	g := newGate(db, nodes)
 	g.geo = geo.Open(dataDir())
@@ -122,14 +128,14 @@ func run() error {
 	slog.Info("IP geolocation by DB-IP", "url", "https://db-ip.com")
 	go g.geo.Update(ctx)
 	g.hosts = func(name string) string {
-		n := nodes.Self()
 		if name != "" {
-			n = nodes.Get(name)
+			st, _ := nodes.Status(name)
+			return st.DNSName
 		}
-		if n == nil {
-			return ""
+		if self := nodes.Self(); self != nil {
+			return self.Status().DNSName
 		}
-		return n.Status().DNSName
+		return ""
 	}
 	g.peers = func(ctx context.Context) ([]node.Peer, error) { return nodes.Self().Peers(ctx) }
 	self := nodes.StartSelf(hostname, g.web(false), g.web(true))
@@ -147,7 +153,7 @@ func run() error {
 	if setupKey == "" {
 		slog.Info("tailgate is ready", "admin", "https://"+g.hosts("")+"/admin")
 	} else {
-		slog.Warn("setup isn't done, so services and funnel stay off until you open the setup link", "url", "https://"+g.hosts("")+"/setup?key="+setupKey)
+		slog.Warn("setup isn't done, so apps and funnel stay off until you open the setup link", "url", "https://"+g.hosts("")+"/setup?key="+setupKey)
 	}
 
 	changed := make(chan struct{}, 1)
@@ -163,6 +169,20 @@ func run() error {
 	go func() {
 		for range time.Tick(time.Hour) {
 			trigger()
+		}
+	}()
+	// unused nodes and tailscale services are deleted in the tailscale admin console, which tailgate only sees by asking
+	go func() {
+		lastErr := ""
+		for range time.Tick(30 * time.Second) {
+			pruned, err := nodes.Prune(ctx, g.inUse())
+			if msg := fmt.Sprint(err); err != nil && msg != lastErr {
+				slog.Warn("checking for deleted devices failed", "error", msg)
+			}
+			lastErr = fmt.Sprint(err)
+			if pruned {
+				trigger()
+			}
 		}
 	}()
 	go func() {
@@ -184,11 +204,11 @@ func run() error {
 			g.dockerErr = err
 			g.mu.Unlock()
 			if err != nil {
-				// keep what's running, a docker hiccup shouldn't take every service down
+				// keep what's running, a docker hiccup shouldn't take every app down
 				slog.Error("listing containers failed", "error", err.Error())
 				continue
 			}
-			g.reconcile(service.FromContainers(containers, os.Getenv("TAILGATE_NETWORK")))
+			g.reconcile(app.FromContainers(containers, os.Getenv("TAILGATE_NETWORK")))
 		case <-ctx.Done():
 			slog.Info("shutting down")
 			return nil
@@ -204,7 +224,7 @@ type gate struct {
 	access    tokens[accessToken]
 	transport *http.Transport
 	rp        *httputil.ReverseProxy
-	// hosts gives a service node's DNS name, or the tailgate node's for "", and "" until it has joined
+	// hosts gives an app node's DNS name, or the tailgate node's for "", and "" until it has joined
 	hosts func(name string) string
 	peer  func(context.Context) (*node.Peer, error)
 	peers func(context.Context) ([]node.Peer, error)
@@ -213,20 +233,20 @@ type gate struct {
 	// geo is nil in tests
 	geo *geo.DB
 
-	mu       sync.RWMutex
-	services []service.Service
-	routes   map[string]service.Service
-	unused   []string
+	mu     sync.RWMutex
+	apps   []app.App
+	routes map[string]app.App
+	unused []string
 	// dockerErr is set while listing containers fails
 	dockerErr error
 	rules     *rules.Set
-	// rulesErr is set when the saved rules can't be loaded, which blocks every service request
+	// rulesErr is set when the saved rules can't be loaded, which blocks every app request
 	rulesErr error
 	signer   *rsa.PrivateKey
 }
 
 func newGate(db *store.Store, nodes *node.Manager) *gate {
-	g := &gate{db: db, nodes: nodes, peer: node.PeerOf, refresh: func() {}, routes: map[string]service.Service{}}
+	g := &gate{db: db, nodes: nodes, peer: node.PeerOf, refresh: func() {}, routes: map[string]app.App{}}
 	g.transport, g.rp = newProxy()
 	g.loadRules()
 	return g
@@ -244,7 +264,7 @@ func (g *gate) loadRules() {
 		}
 	}
 	if err != nil {
-		slog.Error("loading the rules failed, so every service request is blocked", "error", err.Error())
+		slog.Error("loading the rules failed, so every app request is blocked", "error", err.Error())
 	}
 	g.mu.Lock()
 	g.rules, g.rulesErr = set, err
@@ -257,15 +277,15 @@ func (g *gate) ruleSet() (*rules.Set, error) {
 	return g.rules, g.rulesErr
 }
 
-// route returns a service that's routed, which means its labels are valid
-func (g *gate) route(id string) (service.Service, bool) {
+// route returns an app that's routed, which means its labels are valid
+func (g *gate) route(id string) (app.App, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	s, ok := g.routes[id]
 	return s, ok
 }
 
-// hostname is what people see a service called, its id while it isn't routed
+// hostname is what people see an app called, its id while it isn't routed
 func (g *gate) hostname(id string) string {
 	if s, ok := g.route(id); ok {
 		return s.Hostname
@@ -273,44 +293,37 @@ func (g *gate) hostname(id string) string {
 	return id
 }
 
-func (g *gate) routed() []service.Service {
+func (g *gate) routed() []app.App {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return slices.SortedFunc(maps.Values(g.routes), func(a, b service.Service) int { return cmp.Compare(a.ID, b.ID) })
+	return slices.SortedFunc(maps.Values(g.routes), func(a, b app.App) int { return cmp.Compare(a.ID, b.ID) })
 }
 
-func (g *gate) snapshot() ([]service.Service, []string, error) {
+func (g *gate) snapshot() ([]app.App, []string, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.services, g.unused, g.dockerErr
+	return g.apps, g.unused, g.dockerErr
 }
 
-// inUse is every name a container has, broken ones too, so their nodes aren't unused
+// inUse is every id that could use a node, broken apps too, so their nodes aren't unused
 func (g *gate) inUse() map[string]bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	names := map[string]bool{}
-	for _, s := range g.services {
-		if s.ID != "" {
+	for _, s := range g.apps {
+		if s.ID != "" && (s.Err != nil || s.Funnel) {
 			names[s.ID] = true
 		}
 	}
 	return names
 }
 
-func (g *gate) nodeStatus(name string) (node.Status, bool) {
-	if n := g.nodes.Get(name); n != nil {
-		return n.Status(), true
-	}
-	return node.Status{}, false
-}
-
-// reconcile routes every valid service, starts its node and stops the rest
-func (g *gate) reconcile(services []service.Service) {
-	routes := map[string]service.Service{}
+// reconcile routes every valid app, starts its node and stops the rest
+func (g *gate) reconcile(apps []app.App) {
+	routes := map[string]app.App{}
 	g.mu.RLock()
 	old := map[string]string{}
-	for _, s := range g.services {
+	for _, s := range g.apps {
 		if s.Err != nil {
 			old[s.Container] = s.Err.Error()
 		}
@@ -325,15 +338,15 @@ func (g *gate) reconcile(services []service.Service) {
 		slog.Error("checking setup failed, so nothing is routed", "error", err.Error())
 	}
 	funnel := false
-	for _, s := range services {
+	for _, s := range apps {
 		if s.Err != nil {
 			if old[s.Container] != s.Err.Error() {
-				slog.Error("service has errors and isn't routed", "container", s.Container, "service", s.ID, "error", s.Err.Error())
+				slog.Error("app has errors and isn't routed", "container", s.Container, "app", s.ID, "error", s.Err.Error())
 			}
 			continue
 		}
 		if s.Funnel && s.DangerouslyDisableAuth && !public[s.ID] {
-			slog.Warn("service is on funnel with auth disabled, so anyone on the internet can use it", "service", s.ID)
+			slog.Warn("app is on funnel with auth disabled, so anyone on the internet can use it", "app", s.ID)
 		}
 		if pending || err != nil {
 			continue
@@ -350,18 +363,28 @@ func (g *gate) reconcile(services []service.Service) {
 		}
 	}
 	// update the routes before starting nodes so a new node never routes to nothing
-	g.services, g.routes = services, routes
+	g.apps, g.routes = apps, routes
 	g.mu.Unlock()
 	if moved {
 		g.transport.CloseIdleConnections()
 	}
 	for _, name := range g.nodes.Running() {
-		if _, ok := routes[name]; !ok {
+		if s, ok := routes[name]; !ok || !s.Funnel {
 			g.nodes.Stop(name)
 		}
 	}
+	for _, name := range g.nodes.Hosted() {
+		if s, ok := routes[name]; !ok || s.Funnel {
+			g.nodes.Unhost(name)
+		}
+	}
 	for name, s := range routes {
-		g.nodes.Start(name, s.Hostname, g.serviceHandler(name), s.Funnel)
+		// funnel only works on a node's own name, the rest are tailscale services on the tailgate node
+		if s.Funnel {
+			g.nodes.Start(name, s.Hostname, g.appHandler(name), s.Funnel)
+		} else {
+			g.nodes.Host(name, s.Hostname, g.appHandler(name))
+		}
 	}
 	// funnel visitors have to reach the login page
 	g.nodes.Self().SetFunnel(funnel)
@@ -373,7 +396,7 @@ func (g *gate) reconcile(services []service.Service) {
 	}
 	g.mu.Lock()
 	if !slices.Equal(unused, g.unused) && len(unused) > 0 {
-		slog.Info("unused nodes", "nodes", unused)
+		slog.Info("unused nodes and tailscale services", "unused", unused)
 	}
 	g.unused = unused
 	g.mu.Unlock()

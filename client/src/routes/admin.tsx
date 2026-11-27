@@ -1,23 +1,20 @@
 import { Navigate, Route, Routes } from "react-router";
-import { api, type Me, type Services } from "../api";
+import { api, type Me, type Apps } from "../api";
 import { AdminContext, AdminShell } from "../components/admin-shell";
-import { needsAttention } from "../components/services/status";
+import { needsAttention } from "../components/apps/status";
 import { NarrowPage } from "../components/narrow-page";
 import { POLL, useLoad } from "../hooks/use-load";
 import { Button } from "../ui/button";
 import { TooltipProvider } from "../ui/tooltip";
 import { OIDCRoute } from "./admin_oidc";
 import { RulesRoute } from "./admin_rules";
-import { ServicesRoute } from "./admin_services";
+import { AppsRoute } from "./admin_apps";
 import { UserRoute } from "./admin_user";
 import { UsersRoute } from "./admin_users";
 
 export default function AdminRoutes() {
   const [me, meError] = useLoad(() => api<Me>("GET", "/api/me"));
-  const [services, servicesError, reloadServices] = useLoad(
-    () => api<Services>("GET", "/api/admin/services"),
-    POLL,
-  );
+  const [apps, appsError, reloadApps] = useLoad(() => api<Apps>("GET", "/api/admin/apps"), POLL);
 
   if (meError) return <NarrowPage title="Something went wrong" description={meError} />;
   if (!me) return null;
@@ -33,24 +30,24 @@ export default function AdminRoutes() {
         description={`You're signed in as ${me.user.name}, who isn't an admin`}
       >
         <Button variant="link" asChild>
-          <a href="/">Your services</a>
+          <a href="/">Your apps</a>
         </Button>
       </NarrowPage>
     );
   }
 
-  const serviceIDs = services?.services.filter((s) => !s.error).map((s) => s.id) ?? [];
-  const attention = !!services && needsAttention(services);
+  const appIDs = apps?.apps.filter((s) => !s.error).map((s) => s.id) ?? [];
+  const attention = !!apps && needsAttention(apps);
   return (
-    <AdminContext value={{ me, services, reloadServices, serviceIDs }}>
+    <AdminContext value={{ me, apps, reloadApps, appIDs }}>
       <TooltipProvider>
         <AdminShell attention={attention} name={me.user.name} canSignOut={me.via !== "tailnet"}>
-          {servicesError && <p className="mb-6 text-[13px] text-danger">{servicesError}</p>}
+          {appsError && <p className="mb-6 text-[13px] text-danger">{appsError}</p>}
           <Routes>
             <Route index element={<Navigate to="users" replace />} />
             <Route path="users" element={<UsersRoute />} />
             <Route path="users/:id" element={<UserRoute />} />
-            <Route path="services" element={<ServicesRoute />} />
+            <Route path="apps" element={<AppsRoute />} />
             <Route path="rules" element={<RulesRoute />} />
             <Route path="oidc" element={<OIDCRoute />} />
             <Route path="*" element={<Navigate to="users" replace />} />

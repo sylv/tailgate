@@ -44,17 +44,17 @@ type Store struct {
 }
 
 type User struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Note        string   `json:"note"`
-	Email       string   `json:"email"`
-	Admin       bool     `json:"admin"`
-	AllServices bool     `json:"allServices"`
-	Services    []string `json:"services"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Note    string   `json:"note"`
+	Email   string   `json:"email"`
+	Admin   bool     `json:"admin"`
+	AllApps bool     `json:"allApps"`
+	Apps    []string `json:"apps"`
 }
 
-func (u *User) HasAccess(service string) bool {
-	return u.AllServices || slices.Contains(u.Services, service)
+func (u *User) HasAccess(app string) bool {
+	return u.AllApps || slices.Contains(u.Apps, app)
 }
 
 type Key struct {
@@ -145,7 +145,7 @@ func (s *Store) StartSetup() (string, error) {
 	}
 	if users == 0 {
 		userID = rand.Text()
-		if _, err := tx.Exec(`INSERT INTO users (id, name, is_admin, has_all_services) VALUES (?, 'admin', 1, 1)`, userID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO users (id, name, is_admin, has_all_apps) VALUES (?, 'admin', 1, 1)`, userID); err != nil {
 			return "", err
 		}
 	} else {
@@ -207,25 +207,25 @@ func (s *Store) User(id string) (*User, error) { return user(s.db, id) }
 
 func user(q querier, id string) (*User, error) {
 	u := &User{ID: id}
-	err := q.QueryRow(`SELECT name, note, email, is_admin, is_admin OR has_all_services FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllServices)
+	err := q.QueryRow(`SELECT name, note, email, is_admin, is_admin OR has_all_apps FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllApps)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.Query(`SELECT service FROM user_services WHERE user_id = ? ORDER BY service`, id)
+	rows, err := q.Query(`SELECT app FROM user_apps WHERE user_id = ? ORDER BY app`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	u.Services = []string{}
+	u.Apps = []string{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		u.Services = append(u.Services, name)
+		u.Apps = append(u.Apps, name)
 	}
 	return u, rows.Err()
 }
@@ -276,7 +276,7 @@ func (s *Store) LoginUser(loginID int64) (*User, error) {
 }
 
 // CreateSession returns a new session token for host. host is "" for the
-// tailgate node, and parent is the tailgate node session a service session
+// tailgate node, and parent is the tailgate node session an app session
 // was made from
 func (s *Store) CreateSession(userID, keyID, host, parent string) (string, error) {
 	now := time.Now()
@@ -382,7 +382,7 @@ func (s *Store) Users() ([]UserDetail, error) {
 
 // SaveUser creates the user when u.ID is "" and updates it otherwise. It
 // returns the user's ID. u.Admin is ignored, only SetAdmin changes it. Admins
-// reach every service, so their saved AllServices is kept for if they're demoted
+// reach every app, so their saved AllApps is kept for if they're demoted
 func (s *Store) SaveUser(u User) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -391,10 +391,10 @@ func (s *Store) SaveUser(u User) (string, error) {
 	defer tx.Rollback()
 	if u.ID == "" {
 		u.ID = rand.Text()
-		_, err = tx.Exec(`INSERT INTO users (id, name, note, email, has_all_services) VALUES (?, ?, ?, ?, ?)`, u.ID, u.Name, u.Note, u.Email, u.AllServices)
+		_, err = tx.Exec(`INSERT INTO users (id, name, note, email, has_all_apps) VALUES (?, ?, ?, ?, ?)`, u.ID, u.Name, u.Note, u.Email, u.AllApps)
 	} else {
 		var res sql.Result
-		res, err = tx.Exec(`UPDATE users SET name = ?, note = ?, email = ?, has_all_services = CASE WHEN is_admin THEN has_all_services ELSE ? END WHERE id = ?`, u.Name, u.Note, u.Email, u.AllServices, u.ID)
+		res, err = tx.Exec(`UPDATE users SET name = ?, note = ?, email = ?, has_all_apps = CASE WHEN is_admin THEN has_all_apps ELSE ? END WHERE id = ?`, u.Name, u.Note, u.Email, u.AllApps, u.ID)
 		if n, _ := rowsAffected(res, err); err == nil && n == 0 {
 			return "", ErrNotFound
 		}
@@ -402,11 +402,11 @@ func (s *Store) SaveUser(u User) (string, error) {
 	if err != nil {
 		return "", uniqueErr(err)
 	}
-	if _, err := tx.Exec(`DELETE FROM user_services WHERE user_id = ?`, u.ID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM user_apps WHERE user_id = ?`, u.ID); err != nil {
 		return "", err
 	}
-	for _, name := range u.Services {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO user_services (user_id, service) VALUES (?, ?)`, u.ID, name); err != nil {
+	for _, name := range u.Apps {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO user_apps (user_id, app) VALUES (?, ?)`, u.ID, name); err != nil {
 			return "", err
 		}
 	}
@@ -560,13 +560,13 @@ func (s *Store) SaveRules(list []rules.Rule) error {
 type OIDCClient struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
-	Service      string   `json:"service"`
+	App          string   `json:"app"`
 	RedirectURIs []string `json:"redirectURIs"`
 	CreatedAt    int64    `json:"createdAt"`
 }
 
 func (s *Store) OIDCClients() ([]OIDCClient, error) {
-	rows, err := s.db.Query(`SELECT id, name, service, redirect_uris, created_at FROM oidc_clients ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, app, redirect_uris, created_at FROM oidc_clients ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -583,18 +583,18 @@ func (s *Store) OIDCClients() ([]OIDCClient, error) {
 }
 
 func (s *Store) OIDCClient(id string) (*OIDCClient, error) {
-	return scanClient(s.db.QueryRow(`SELECT id, name, service, redirect_uris, created_at FROM oidc_clients WHERE id = ?`, id))
+	return scanClient(s.db.QueryRow(`SELECT id, name, app, redirect_uris, created_at FROM oidc_clients WHERE id = ?`, id))
 }
 
 // OIDCClientBySecret returns the client when the secret is its own, or ErrNotFound
 func (s *Store) OIDCClientBySecret(id, secret string) (*OIDCClient, error) {
-	return scanClient(s.db.QueryRow(`SELECT id, name, service, redirect_uris, created_at FROM oidc_clients WHERE id = ? AND secret_hash = ?`, id, hash(secret)))
+	return scanClient(s.db.QueryRow(`SELECT id, name, app, redirect_uris, created_at FROM oidc_clients WHERE id = ? AND secret_hash = ?`, id, hash(secret)))
 }
 
 func scanClient(row interface{ Scan(...any) error }) (*OIDCClient, error) {
 	var c OIDCClient
 	var uris string
-	err := row.Scan(&c.ID, &c.Name, &c.Service, &uris, &c.CreatedAt)
+	err := row.Scan(&c.ID, &c.Name, &c.App, &uris, &c.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -612,12 +612,12 @@ func (s *Store) SaveOIDCClient(c OIDCClient) (id, secret string, err error) {
 		return "", "", err
 	}
 	if c.ID != "" {
-		res, err := s.db.Exec(`UPDATE oidc_clients SET name = ?, service = ?, redirect_uris = ? WHERE id = ?`, c.Name, c.Service, string(uris), c.ID)
+		res, err := s.db.Exec(`UPDATE oidc_clients SET name = ?, app = ?, redirect_uris = ? WHERE id = ?`, c.Name, c.App, string(uris), c.ID)
 		return c.ID, "", found(res, err)
 	}
 	id, secret = rand.Text(), rand.Text()
-	_, err = s.db.Exec(`INSERT INTO oidc_clients (id, name, service, redirect_uris, secret_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, c.Name, c.Service, string(uris), hash(secret), time.Now().Unix())
+	_, err = s.db.Exec(`INSERT INTO oidc_clients (id, name, app, redirect_uris, secret_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, c.Name, c.App, string(uris), hash(secret), time.Now().Unix())
 	return id, secret, err
 }
 

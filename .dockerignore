@@ -6,7 +6,7 @@
 !geo/*.go
 !node/*.go
 !rules/*.go
-!service/*.go
+!app/*.go
 !store/*.go
 !store/migrations
 !package.json

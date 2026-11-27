@@ -46,11 +46,7 @@ export function SetupRoute() {
   }
 
   return (
-    <NarrowPage
-      brand
-      title="Set up tailgate"
-      description="Create the first admin, who can reach every service"
-    >
+    <NarrowPage brand title="Set up tailgate" description="Create the first admin, who can reach every app">
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
