@@ -207,7 +207,7 @@ tailgate strips its keys and cookie before the request reaches the app
 
 > [!WARNING] passkeys belong to the tailgate node's name, so changing `TAILGATE_HOSTNAME` or your tailnet's name breaks every passkey. sign in with a key and add them again. users may also forget their keys, but lets be honest, they were going to do that anyway.
 
-after signing in with a key on supported devices, tailgate offers to add a passkey. the login page then has a "Sign in with a passkey" button. each user's keys and passkeys are listed on their dashboard, and admins can remove them on the user's page. set `TAILGATE_PASSKEYS=false` to turn passkeys off
+after signing in with a key on supported devices, tailgate offers to add a passkey. the login page then has a "Sign in with a passkey" button. each user's keys and passkeys are listed under "Sign-in methods" on their dashboard. users can remove their own there, and admins can remove them on the user's page. set `TAILGATE_PASSKEYS=false` to turn passkeys off
 
 the admin pages need a key or passkey session. an admin signed in by their tailnet login needs to re-auth with one of those.
 

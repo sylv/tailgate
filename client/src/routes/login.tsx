@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { api, signOut, type Me } from "../api";
+import { signOut, type Me } from "../api";
 import { NarrowPage } from "../components/narrow-page";
 import { PasskeyPrompt, SignInForm } from "../components/sign-in";
-import { useLoad } from "../hooks/use-load";
+import { useApi } from "../hooks/use-api";
 import { Button } from "../ui/button";
 
 export function LoginRoute() {
@@ -12,7 +12,7 @@ export function LoginRoute() {
     location.pathname === "/oidc/authorize"
       ? { client: q.get("client_id") ?? "" }
       : { to: q.get("to") ?? "" };
-  const [me, loadError] = useLoad(() => api<Me>("GET", "/api/me?" + new URLSearchParams(target)));
+  const [me, loadError] = useApi<Me>("/api/me?" + new URLSearchParams(target));
   const [prompt, setPrompt] = useState(false);
 
   if (loadError) return <NarrowPage title="Can't sign in" description={loadError} />;

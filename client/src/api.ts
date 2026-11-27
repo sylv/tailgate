@@ -15,6 +15,9 @@ export interface Key {
   label: string;
   createdAt: number;
   lastUsedAt: number | null;
+  // whether this session signed in with it, and whether the viewer can remove it
+  current: boolean;
+  removable: boolean;
 }
 
 export interface Login {
@@ -31,6 +34,8 @@ export interface Passkey {
   lastUsedAt: number | null;
   // the browser it was last used from
   userAgent: string;
+  current: boolean;
+  removable: boolean;
 }
 
 export interface UserDetail extends User {
@@ -43,8 +48,8 @@ export interface Me {
   user: User | null;
   via?: "session" | "key" | "tailnet";
   login?: string;
-  // url is "" until the app is online, funnel is whether it can be opened from the internet
-  apps: { name: string; url: string; funnel: boolean }[];
+  // url is "" when the visitor can't open it, and why says why
+  apps: { name: string; url: string; why?: string }[];
   // the app from ?to=, and why it can't be signed in to
   target?: string;
   error?: string;
@@ -53,6 +58,8 @@ export interface Me {
   passkeys?: Passkey[];
   // TAILGATE_PASSKEYS
   passkeysOn: boolean;
+  // whether this session may add a passkey, if the browser can
+  canAddPasskey: boolean;
   ingress: "tailnet" | "funnel";
   requestId: string;
 }
@@ -99,6 +106,12 @@ export async function signOut(then: string) {
 }
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return (await request<T>(method, path, body)).data;
+}
+
+/** also returns the version of the server's data the answer is from, which signed in
+ * requests get. 0 when it didn't say */
+export async function request<T>(method: string, path: string, body?: unknown) {
   const res = await fetch(path, {
     method,
     headers: method === "GET" ? {} : { "Content-Type": "application/json" },
@@ -106,7 +119,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   });
   const data = await res.json().catch(() => ({ error: `${res.status} ${res.statusText}` }));
   if (!res.ok) throw new Error(data.error);
-  return data as T;
+  return { data: data as T, version: Number(res.headers.get("X-Tailgate-Version") ?? 0) };
 }
 
 export interface Effect {

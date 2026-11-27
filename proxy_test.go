@@ -430,3 +430,62 @@ func TestUserName(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveKey(t *testing.T) {
+	tg := newTestGate(t)
+	other, _ := tg.db.SaveUser(store.User{Name: "lyra"})
+	tg.db.AddKey(other, "")
+	theirs, _ := tg.db.UserDetail(other)
+	id, _ := tg.db.UserIDByName("ezra")
+	tg.db.AddKey(id, "spare")
+	mine, _ := tg.db.UserDetail(id)
+	var current, spare string
+	for _, k := range mine.Keys {
+		if k.Label == "spare" {
+			spare = k.ID
+		} else {
+			current = k.ID
+		}
+	}
+
+	req := httptest.NewRequest("POST", "https://tailgate.ts.net/api/login", strings.NewReader(`{"key":"`+tg.key+`"}`))
+	req.Header = http.Header{"Origin": {"https://tailgate.ts.net"}, "Content-Type": {"application/json"}}
+	rec := httptest.NewRecorder()
+	tg.web.ServeHTTP(rec, req)
+	signedIn := http.Header{"Cookie": {cookieName + "=" + cookie(rec)}, "Origin": {"https://tailgate.ts.net"}}
+	del := func(h http.Handler, key string, header http.Header) int {
+		return do(h, "DELETE", "https://tailgate.ts.net/api/keys/"+key, header).Code
+	}
+
+	if code := del(tg.web, theirs.Keys[0].ID, signedIn); code != http.StatusNotFound {
+		t.Fatalf("someone else's key got %d", code)
+	}
+	if code := del(tg.web, current, signedIn); code != http.StatusBadRequest {
+		t.Fatalf("the key this session signed in with got %d", code)
+	}
+	if code := del(tg.web, spare, signedIn); code != http.StatusOK {
+		t.Fatalf("own key got %d", code)
+	}
+	if d, _ := tg.db.UserDetail(id); len(d.Keys) != 1 {
+		t.Fatal("own key wasn't removed")
+	}
+	if code := del(tg.web, current, http.Header{"Origin": {"https://tailgate.ts.net"}}); code != http.StatusUnauthorized {
+		t.Fatalf("signed out got %d", code)
+	}
+	// a tailnet login has no current key, but still can't remove the last one
+	tg.db.LinkLogin(id, store.Login{ID: 7, Name: "ezra@"})
+	tg.peer = &node.Peer{LoginID: 7, Login: "ezra@"}
+	if code := del(tg.web, current, http.Header{"Origin": {"https://tailgate.ts.net"}}); code != http.StatusBadRequest {
+		t.Fatalf("last key over a tailnet login got %d", code)
+	}
+	tg.peer = nil
+
+	// admins remove anyone's, but only on the tailnet like the rest of the admin pages
+	tg.db.SetAdmin(id, true)
+	if code := del(tg.funnel, theirs.Keys[0].ID, signedIn); code != http.StatusNotFound {
+		t.Fatalf("admin over funnel got %d", code)
+	}
+	if code := del(tg.web, theirs.Keys[0].ID, signedIn); code != http.StatusOK {
+		t.Fatalf("admin on the tailnet got %d", code)
+	}
+}

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router";
-import { api, type Me, type Apps } from "../api";
+import { type Me, type Apps } from "../api";
 import { AdminContext, AdminShell } from "../components/admin-shell";
 import { needsAttention } from "../components/apps/status";
 import { NarrowPage } from "../components/narrow-page";
 import { PasskeyPrompt, SignInForm } from "../components/sign-in";
-import { useLoad } from "../hooks/use-load";
+import { useApi } from "../hooks/use-api";
 import { Button } from "../ui/button";
 import { OIDCRoute } from "./admin_oidc";
 import { RulesRoute } from "./admin_rules";
@@ -14,7 +14,7 @@ import { UserRoute } from "./admin_user";
 import { UsersRoute } from "./admin_users";
 
 export default function AdminRoutes() {
-  const [me, meError] = useLoad(() => api<Me>("GET", "/api/me"));
+  const [me, meError] = useApi<Me>("/api/me");
   const [prompt, setPrompt] = useState(false);
 
   if (meError) return <NarrowPage title="Something went wrong" description={meError} />;
@@ -54,7 +54,7 @@ export default function AdminRoutes() {
 }
 
 function Admin({ me }: { me: Me }) {
-  const [apps, appsError, reloadApps] = useLoad(() => api<Apps>("GET", "/api/admin/apps"), true);
+  const [apps, appsError, reloadApps] = useApi<Apps>("/api/admin/apps", true);
   const appIDs = apps?.apps.filter((s) => !s.error).map((s) => s.id) ?? [];
   const attention = !!apps && needsAttention(apps);
   return (

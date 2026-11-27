@@ -9,7 +9,7 @@ import { KeyDialog } from "../components/key-dialog";
 import { Keys } from "../components/users/keys";
 import { Logins } from "../components/users/logins";
 import { UserForm } from "../components/users/user-form";
-import { useLoad } from "../hooks/use-load";
+import { useApi } from "../hooks/use-api";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu";
@@ -49,7 +49,7 @@ export function UserRoute() {
 
 function ExistingUser({ id }: { id: string }) {
   const navigate = useNavigate();
-  const [users, error, reload] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), true);
+  const [users, error, reload] = useApi<UserDetail[]>("/api/admin/users", true);
   const [confirming, setConfirming] = useState<"reset" | "delete">();
   const [revealed, setRevealed] = useState<{ k: NewKey; title: string }>();
 

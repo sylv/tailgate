@@ -271,6 +271,9 @@ type gate struct {
 
 func newGate(db *store.Store) *gate {
 	g := &gate{db: db, peer: node.PeerOf, refresh: func() {}, routes: map[string]app.App{}}
+	// starting at the clock keeps versions going up across restarts, so a page can tell
+	// its data is older than the stream's version
+	g.events.version = int(time.Now().UnixMilli())
 	g.transport, g.rp = newProxy()
 	g.loadRules()
 	return g

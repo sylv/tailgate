@@ -1,15 +1,15 @@
 import { CaretRightIcon, PlusIcon } from "@phosphor-icons/react";
 import { Link } from "react-router";
-import { api, type UserDetail } from "../api";
+import { type UserDetail } from "../api";
 import { PageHeader } from "../components/admin-shell";
 import { Empty, ErrorText, List } from "../components/section";
 import { accessText } from "../components/users/access";
-import { useLoad } from "../hooks/use-load";
+import { useApi } from "../hooks/use-api";
 import { Ago } from "../lib/time";
 import { Button } from "../ui/button";
 
 export function UsersRoute() {
-  const [users, error] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), true);
+  const [users, error] = useApi<UserDetail[]>("/api/admin/users", true);
   return (
     <>
       <PageHeader

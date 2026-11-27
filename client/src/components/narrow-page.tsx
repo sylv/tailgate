@@ -32,7 +32,7 @@ const Footer: FC<{ me: Me }> = ({ me }) => {
   const [requestId] = useState(me.requestId);
   return (
     <footer className="pb-4 text-center text-xs text-fg-faint">
-      {me.ingress === "funnel" ? "Through Funnel" : "On the tailnet"}, request{" "}
+      {me.ingress === "funnel" ? "via Funnel" : "via tailnet"}, request{" "}
       <span className="font-mono select-all">{requestId}</span>
     </footer>
   );

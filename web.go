@@ -36,6 +36,8 @@ func (g *gate) web(funnel bool) http.Handler {
 	mux.HandleFunc("GET /api/events", g.stream)
 	mux.HandleFunc("POST /api/login", g.api(false, g.signIn))
 	mux.HandleFunc("POST /api/logout", g.api(false, g.signOut))
+	mux.HandleFunc("DELETE /api/keys/{id}", g.api(false, g.removeCred(funnel, false)))
+	mux.HandleFunc("DELETE /api/passkeys/{id}", g.api(false, g.removeCred(funnel, true)))
 	if g.passkeys {
 		g.passkeyRoutes(mux)
 	}
@@ -110,18 +112,18 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 		mux.HandleFunc("GET "+path, g.page)
 	}
 	mux.HandleFunc("POST /api/setup", g.api(false, g.setup))
-	mux.HandleFunc("GET /api/admin/users", g.api(true, func(http.ResponseWriter, *http.Request, *identity) (any, error) { return g.db.Users() }))
+	mux.HandleFunc("GET /api/admin/users", g.api(true, func(_ http.ResponseWriter, _ *http.Request, id *identity) (any, error) {
+		users, err := g.db.Users()
+		for i := range users {
+			markCreds(id, false, &users[i])
+		}
+		return users, err
+	}))
 	mux.HandleFunc("POST /api/admin/users", g.api(true, g.saveUser))
 	mux.HandleFunc("PUT /api/admin/users/{id}", g.api(true, g.saveUser))
 	mux.HandleFunc("DELETE /api/admin/users/{id}", g.api(true, g.deleteUser))
 	mux.HandleFunc("POST /api/admin/users/{id}/keys", g.api(true, g.addKey))
 	mux.HandleFunc("POST /api/admin/users/{id}/reset-keys", g.api(true, g.resetKeys))
-	mux.HandleFunc("DELETE /api/admin/keys/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
-		return nil, g.db.RevokeKey(r.PathValue("id"))
-	}))
-	mux.HandleFunc("DELETE /api/admin/passkeys/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
-		return nil, g.db.DeletePasskey(r.PathValue("id"))
-	}))
 	mux.HandleFunc("POST /api/admin/users/{id}/logins", g.api(true, g.linkLogin))
 	mux.HandleFunc("DELETE /api/admin/logins/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -221,6 +223,11 @@ func (g *gate) api(admin bool, fn func(http.ResponseWriter, *http.Request, *iden
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		id := requestOf(r.Context()).ident
+		if id != nil {
+			// read before the handler runs, so the data is at least this new
+			v, _ := g.events.current()
+			w.Header().Set("X-Tailgate-Version", strconv.Itoa(v))
+		}
 		var err error
 		switch {
 		case admin && (id == nil || !id.user.Admin):
@@ -268,10 +275,9 @@ func decode(r *http.Request, v any) error {
 
 type link struct {
 	Name string `json:"name"`
-	// URL is "" until the app is online
+	// URL is "" when the visitor can't open it, and Why says why
 	URL string `json:"url"`
-	// Funnel is whether it can be opened from the internet right now
-	Funnel bool `json:"funnel"`
+	Why string `json:"why,omitempty"`
 }
 
 func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, error) {
@@ -287,6 +293,8 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		Passkeys []store.Passkey `json:"passkeys,omitempty"`
 		// PasskeysOn is TAILGATE_PASSKEYS
 		PasskeysOn bool `json:"passkeysOn"`
+		// CanAddPasskey is whether this session may add one, if the browser can
+		CanAddPasskey bool `json:"canAddPasskey"`
 		// Ingress and RequestID are for the page footer, so a visitor can say how they came and which request it was
 		Ingress   string `json:"ingress"`
 		RequestID string `json:"requestId"`
@@ -315,16 +323,22 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 	if err != nil {
 		return nil, err
 	}
+	markCreds(id, res.Ingress == "funnel", d)
+	res.CanAddPasskey = g.passkeys && id.via == "session"
 	res.Keys, res.Passkeys = d.Keys, d.Passkeys
 	if client != nil && id.user.HasAccess(client.App) && id.user.Email == "" {
 		res.Error = id.user.Name + " has no email, which signing in to " + g.hostname(client.App) + " needs. Ask an admin to add one"
 	}
 	for _, s := range g.routed() {
 		if id.user.HasAccess(s.ID) {
-			l := link{Name: s.Hostname}
+			l := link{Name: s.Hostname, Why: "Starting"}
 			// a node that couldn't turn funnel on still serves the tailnet
 			if st, ok := g.appStatus(s.ID); ok && (st.State == node.Online || st.State == node.FunnelNotAllowed) {
-				l.URL, l.Funnel = "https://"+st.DNSName, st.Funnel
+				l.URL, l.Why = "https://"+st.DNSName, ""
+				// funnel visitors can't reach a tailnet only app, the link would time out
+				if res.Ingress == "funnel" && !st.Funnel {
+					l.URL, l.Why = "", "Tailnet only"
+				}
 			}
 			res.Apps = append(res.Apps, l)
 		}
@@ -332,12 +346,74 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 	return res, nil
 }
 
+// removeErr is why id can't remove a key or passkey of owner, nil when it can. users
+// remove their own, and admins anyone's on the tailnet with the same sign in the admin
+// pages need. nobody removes the one they're signed in with or their own last key, so
+// they can't lock themselves out
+func removeErr(id *identity, funnel bool, owner *store.UserDetail, target string, passkey bool) error {
+	own := owner.ID == id.user.ID
+	switch {
+	case !own && (!id.user.Admin || id.via != "session" || funnel):
+		return store.ErrNotFound
+	case target == id.cred.KeyID || target == id.cred.PasskeyID:
+		return &apiError{http.StatusBadRequest, "You're signed in with that one, sign in another way to remove it"}
+	case own && !passkey && len(owner.Keys) == 1:
+		return &apiError{http.StatusBadRequest, "That's your last key, ask an admin for a new one first"}
+	}
+	return nil
+}
+
+// markCreds sets which of d's keys and passkeys id signed in with and can remove
+func markCreds(id *identity, funnel bool, d *store.UserDetail) {
+	for i := range d.Keys {
+		k := &d.Keys[i]
+		k.Current, k.Removable = k.ID == id.cred.KeyID, removeErr(id, funnel, d, k.ID, false) == nil
+	}
+	for i := range d.Passkeys {
+		p := &d.Passkeys[i]
+		p.Current, p.Removable = p.ID == id.cred.PasskeyID, removeErr(id, funnel, d, p.ID, true) == nil
+	}
+}
+
+func (g *gate) removeCred(funnel, passkey bool) func(http.ResponseWriter, *http.Request, *identity) (any, error) {
+	remove := g.db.RevokeKey
+	if passkey {
+		remove = g.db.DeletePasskey
+	}
+	return func(_ http.ResponseWriter, r *http.Request, id *identity) (any, error) {
+		if id == nil {
+			return nil, &apiError{http.StatusUnauthorized, "Sign in first"}
+		}
+		target := r.PathValue("id")
+		owner, err := g.db.CredOwner(target, passkey)
+		if err != nil {
+			return nil, err
+		}
+		d, err := g.db.UserDetail(owner)
+		if err != nil {
+			return nil, err
+		}
+		if err := removeErr(id, funnel, d, target, passkey); err != nil {
+			return nil, err
+		}
+		if err := remove(target); err != nil {
+			return nil, err
+		}
+		g.events.bump()
+		return nil, nil
+	}
+}
+
 func (g *gate) signIn(w http.ResponseWriter, r *http.Request, id *identity) (any, error) {
 	var body struct{ Key string }
 	if err := decode(r, &body); err != nil {
 		return nil, err
 	}
-	u, keyID, err := g.db.KeyUser(strings.TrimSpace(body.Key))
+	key := strings.TrimSpace(body.Key)
+	if strings.HasPrefix(key, "tgs_") {
+		return nil, badRequest("That's a setup key. Open the setup link from tailgate's logs instead")
+	}
+	u, keyID, err := g.db.KeyUser(key)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, &apiError{http.StatusUnauthorized, "That key isn't valid"}
 	}

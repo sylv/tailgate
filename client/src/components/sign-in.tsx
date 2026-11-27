@@ -66,10 +66,6 @@ export const SignInForm: FC<{ me: Me; offerPasskey: () => void }> = ({ me, offer
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
           e.preventDefault();
-          if (key.trim().startsWith("tgs_")) {
-            setError("That's a setup key. Open the setup link from tailgate's logs instead");
-            return;
-          }
           setBusy(true);
           setError("");
           try {

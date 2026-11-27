@@ -66,6 +66,9 @@ type Key struct {
 	Label      string `json:"label"`
 	CreatedAt  int64  `json:"createdAt"`
 	LastUsedAt *int64 `json:"lastUsedAt"`
+	// Current and Removable are for whoever is looking, web.go sets them
+	Current   bool `json:"current"`
+	Removable bool `json:"removable"`
 }
 
 // Login is a tailnet login, ID is its UserProfile.ID
@@ -473,6 +476,20 @@ func addKey(q querier, userID, label string, setup bool) (string, error) {
 	return key, err
 }
 
+// CredOwner returns the id of the user a key or passkey belongs to
+func (s *Store) CredOwner(id string, passkey bool) (string, error) {
+	table := "keys"
+	if passkey {
+		table = "passkeys"
+	}
+	var user string
+	err := s.db.QueryRow(`SELECT user_id FROM `+table+` WHERE id = ?`, id).Scan(&user)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return user, err
+}
+
 // RevokeKey deletes a key, which ends every session made with it
 func (s *Store) RevokeKey(id string) error {
 	res, err := s.db.Exec(`DELETE FROM keys WHERE id = ?`, id)
@@ -695,6 +712,9 @@ type Passkey struct {
 	CreatedAt  int64  `json:"createdAt"`
 	LastUsedAt *int64 `json:"lastUsedAt"`
 	UserAgent  string `json:"userAgent"`
+	// Current and Removable are for whoever is looking, web.go sets them
+	Current   bool `json:"current"`
+	Removable bool `json:"removable"`
 	// Credential is the webauthn.Credential json
 	Credential []byte `json:"-"`
 }

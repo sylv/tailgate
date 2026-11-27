@@ -1,17 +1,17 @@
 import { ArrowUpRightIcon } from "@phosphor-icons/react";
-import { useState } from "react";
-import { api, signOut, type Me } from "../api";
+import { useLayoutEffect, useRef, useState, type FC, type ReactNode } from "react";
+import { signOut, type Me } from "../api";
 import { NarrowPage } from "../components/narrow-page";
 import { Note } from "../components/note";
-import { Empty, ErrorText, List } from "../components/section";
-import { KeyRows, PasskeyRows } from "../components/users/passkeys";
-import { useLoad } from "../hooks/use-load";
+import { Empty, ErrorText } from "../components/section";
+import { Methods } from "../components/users/passkeys";
+import { useApi } from "../hooks/use-api";
 import { addPasskey, cancelled, passkeysSupported } from "../lib/passkeys";
 import { cn } from "../lib/utils";
 import { Button } from "../ui/button";
 
 export function DashboardRoute() {
-  const [me, error, reload] = useLoad(() => api<Me>("GET", "/api/me"), true);
+  const [me, error, reload] = useApi<Me>("/api/me", true);
   const [methods, setMethods] = useState(false);
 
   if (error) return <NarrowPage title="Something went wrong" description={error} />;
@@ -33,37 +33,33 @@ export function DashboardRoute() {
       ) : me.apps.length === 0 ? (
         <Empty>You can't use any apps yet</Empty>
       ) : (
-        <List>
-          {me.apps.map((s) => {
-            // funnel visitors can't reach a tailnet only app, the link would time out
-            const why = !s.url ? "Starting" : me.ingress === "funnel" && !s.funnel ? "Tailnet only" : "";
-            return (
-              <li key={s.name}>
-                <a
-                  href={why ? undefined : s.url}
+        <ScrollList>
+          {me.apps.map((s) => (
+            <li key={s.name}>
+              <a
+                href={s.why ? undefined : s.url}
+                className={cn(
+                  "group flex h-11 items-center justify-between gap-4 px-4",
+                  s.why ? "pointer-events-none" : "hover:bg-raised",
+                )}
+              >
+                <span
                   className={cn(
-                    "group flex h-11 items-center justify-between gap-4 px-4",
-                    why ? "pointer-events-none" : "hover:bg-raised",
+                    "truncate underline-offset-2 group-hover:underline",
+                    s.why && "text-fg-muted",
                   )}
                 >
-                  <span
-                    className={cn(
-                      "truncate underline-offset-2 group-hover:underline",
-                      why && "text-fg-muted",
-                    )}
-                  >
-                    {s.name}
-                  </span>
-                  {why ? (
-                    <span className="shrink-0 text-[13px] text-fg-faint">{why}</span>
-                  ) : (
-                    <ArrowUpRightIcon className="size-4 shrink-0 text-fg-faint group-hover:text-fg" />
-                  )}
-                </a>
-              </li>
-            );
-          })}
-        </List>
+                  {s.name}
+                </span>
+                {s.why ? (
+                  <span className="shrink-0 text-[13px] text-fg-faint">{s.why}</span>
+                ) : (
+                  <ArrowUpRightIcon className="size-4 shrink-0 text-fg-faint group-hover:text-fg" />
+                )}
+              </a>
+            </li>
+          ))}
+        </ScrollList>
       )}
       {me.user.admin && me.ingress === "funnel" && (
         <Note tone="info" className="mt-4">
@@ -93,7 +89,7 @@ export function DashboardRoute() {
   );
 }
 
-const canAddPasskey = (me: Me) => me.passkeysOn && me.via === "session" && passkeysSupported();
+const canAddPasskey = (me: Me) => me.canAddPasskey && passkeysSupported();
 const hasMethods = (me: Me) => (me.keys?.length ?? 0) + (me.passkeys?.length ?? 0) > 0 || canAddPasskey(me);
 
 // how the user signs in, and a way to add a passkey from a key or passkey session
@@ -105,12 +101,7 @@ function SignInMethods({ me, reload }: { me: Me; reload: () => void }) {
   const canAdd = canAddPasskey(me);
   return (
     <section className="flex flex-col gap-3">
-      {keys.length + passkeys.length > 0 && (
-        <List>
-          <PasskeyRows passkeys={passkeys} />
-          <KeyRows keys={keys} />
-        </List>
-      )}
+      <Methods keys={keys} passkeys={passkeys} reload={reload} list={ScrollList} />
       {canAdd && (
         <Button
           className="w-fit"
@@ -134,3 +125,38 @@ function SignInMethods({ me, reload }: { me: Me; reload: () => void }) {
     </section>
   );
 }
+
+// a list that stops growing before it pushes the page past the window, and fades
+// the edge it has more rows past
+const ScrollList: FC<{ children: ReactNode }> = ({ children }) => {
+  const ref = useRef<HTMLUListElement>(null);
+  const [fade, setFade] = useState({ top: false, bottom: false });
+  const update = () => {
+    const el = ref.current;
+    if (!el) return;
+    const top = el.scrollTop > 0;
+    const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+    setFade((f) => (f.top === top && f.bottom === bottom ? f : { top, bottom }));
+  };
+  // rows coming and going don't resize the list once it's at its max height
+  useLayoutEffect(update);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(update);
+    observer.observe(ref.current!);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div className="rounded-md border border-line">
+      <ul
+        ref={ref}
+        onScroll={update}
+        className="max-h-[max(8rem,calc(82dvh_-_8rem))] divide-y divide-line overflow-y-auto"
+        style={{
+          maskImage: `linear-gradient(to bottom, ${fade.top ? "transparent" : "black"}, black 2rem, black calc(100% - 2rem), ${fade.bottom ? "transparent" : "black"})`,
+        }}
+      >
+        {children}
+      </ul>
+    </div>
+  );
+};

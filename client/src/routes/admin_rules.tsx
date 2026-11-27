@@ -5,7 +5,7 @@ import { Note } from "../components/note";
 import { Flow, Stage } from "../components/rules/flow";
 import { AddRule, LockedRule, RuleEditor, RuleSummary } from "../components/rules/rule-item";
 import { ErrorText } from "../components/section";
-import { useLoad } from "../hooks/use-load";
+import { revalidate, useApi } from "../hooks/use-api";
 import { Button } from "../ui/button";
 
 type Draft = Rule & { key: string };
@@ -23,11 +23,12 @@ const strip = (rs: Draft[]): Rule[] =>
   }));
 
 export function RulesRoute() {
-  const [list, error] = useLoad(() => api<RuleList>("GET", "/api/admin/rules"));
-  const [schema] = useLoad(() => api<Schema>("GET", "/api/admin/rules/schema"));
+  const [list, error] = useApi<RuleList>("/api/admin/rules");
+  const [schema] = useApi<Schema>("/api/admin/rules/schema");
   if (error) return <ErrorText>{error}</ErrorText>;
   if (!list || !schema) return null;
-  return <Rules initial={list} schema={schema} />;
+  // the cached list shows first, so a newer one starts the editor over
+  return <Rules key={list.version} initial={list} schema={schema} />;
 }
 
 function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
@@ -89,6 +90,7 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
       } else {
         setSaved(res);
         setRules(res.rules.map(draft));
+        revalidate("/api/admin/rules", true);
         setErrors({});
         setOpen(new Set());
       }
