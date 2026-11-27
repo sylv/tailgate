@@ -36,12 +36,17 @@ tailgate's nodes and tailscale services all carry `tag:tailgate`. add this to yo
 
 ```jsonc
 {
-  "tagOwners": { "tag:tailgate": ["autogroup:admin"] }, // create the tailgate tag
-  "nodeAttrs": [{ "target": ["tag:tailgate"], "attr": ["funnel"] }], // allow funnel on tailgate's nodes
-  "autoApprovers": { "services": { "tag:tailgate": ["tag:tailgate"] } }, // let the tailgate node host the tailscale services it makes
+  // create the tailgate tag
+  "tagOwners": { "tag:tailgate": ["autogroup:admin"] },
+  // allow funnel on tailgate's nodes
+  "nodeAttrs": [{ "target": ["tag:tailgate"], "attr": ["funnel"] }],
+  // let the tailgate node host the tailscale services it makes
+  "autoApprovers": { "services": { "tag:tailgate": ["tag:tailgate"] } },
   "grants": [
-    { "src": ["autogroup:member"], "dst": ["tag:tailgate"], "ip": ["443"] }, // let tailnet members reach tailgate's nodes and tailscale services
-    { "src": ["tag:tailgate"], "dst": ["tag:tailgate"], "ip": ["443"] }, // let the tailgate node see its funnel nodes, so it notices when you delete one
+    // let tailnet members reach tailgate's nodes and tailscale services
+    { "src": ["autogroup:member"], "dst": ["tag:tailgate"], "ip": ["443"] },
+    // let the tailgate node see its funnel nodes, so it notices when you delete one
+    { "src": ["tag:tailgate"], "dst": ["tag:tailgate"], "ip": ["443"] },
   ],
   // you may want to ensure tailgate nodes cannot talk to other nodes in your network
 }
