@@ -1,10 +1,9 @@
 import { useState } from "react";
 import { api, signOut, type Me } from "../api";
 import { NarrowPage } from "../components/narrow-page";
-import { ErrorText } from "../components/section";
+import { PasskeyPrompt, SignInForm } from "../components/sign-in";
 import { useLoad } from "../hooks/use-load";
 import { Button } from "../ui/button";
-import { Field, Input } from "../ui/input";
 
 export function LoginRoute() {
   const q = new URLSearchParams(location.search);
@@ -14,9 +13,7 @@ export function LoginRoute() {
       ? { client: q.get("client_id") ?? "" }
       : { to: q.get("to") ?? "" };
   const [me, loadError] = useLoad(() => api<Me>("GET", "/api/me?" + new URLSearchParams(target)));
-  const [key, setKey] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [prompt, setPrompt] = useState(false);
 
   if (loadError) return <NarrowPage title="Can't sign in" description={loadError} />;
   if (!me) return null;
@@ -55,48 +52,15 @@ export function LoginRoute() {
     );
   }
 
+  if (prompt) return <PasskeyPrompt me={me} />;
+
   return (
-    <NarrowPage title={signIn} description="Use the key you were given" me={me}>
-      <form
-        className="flex flex-col gap-4"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (key.trim().startsWith("tgs_")) {
-            setError("That's a setup key. Open the setup link from tailgate's logs instead");
-            return;
-          }
-          setBusy(true);
-          setError("");
-          try {
-            await api("POST", "/api/login", { key });
-            // the server sends a signed in visitor on to the app, or says why it can't
-            location.reload();
-          } catch (err) {
-            setError((err as Error).message);
-            setBusy(false);
-          }
-        }}
-      >
-        {/* password managers want a username to file the key under */}
-        <input type="text" name="username" autoComplete="username" value="tailgate" readOnly hidden />
-        <Field label="Key">
-          <Input
-            type="password"
-            name="password"
-            autoComplete="current-password"
-            placeholder="tg_…"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            aria-invalid={!!error || undefined}
-            required
-            autoFocus
-          />
-        </Field>
-        <ErrorText>{error}</ErrorText>
-        <Button type="submit" variant="primary" loading={busy} className="mt-2 w-full">
-          Sign in
-        </Button>
-      </form>
+    <NarrowPage
+      title={signIn}
+      description={me.passkeysOn ? "Use a passkey or the key you were given" : "Use the key you were given"}
+      me={me}
+    >
+      <SignInForm me={me} offerPasskey={() => setPrompt(true)} />
     </NarrowPage>
   );
 }

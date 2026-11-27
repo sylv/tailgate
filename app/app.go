@@ -27,26 +27,17 @@ type App struct {
 	Hostname               string `expr:"hostname" desc:"tailgate.hostname, or the id when it isn't set"`
 	Port                   int    `expr:"port" desc:"tailgate.port"`
 	Funnel                 bool   `expr:"funnel" desc:"tailgate.funnel"`
-	DangerouslyDisableAuth bool   `expr:"dangerouslyDisableAuth" desc:"tailgate.dangerously-disable-auth"`
+	DangerouslyDisableAuth bool   `expr:"dangerouslyDisableAuth" desc:"tailgate.dangerouslyDisableAuth"`
 	Noindex                bool   `expr:"noindex" desc:"tailgate.noindex"`
 	Network                string `expr:"network" desc:"tailgate.network, \"\" when it isn't set"`
 	Err                    error  `expr:"-"`
 }
 
-// spellings maps every accepted spelling of a label key to its kebab case form
-var spellings = map[string]string{}
+var keys = []string{"id", "hostname", "port", "funnel", "dangerouslyDisableAuth", "noindex", "network"}
 
-func init() {
-	for _, key := range []string{"id", "hostname", "port", "funnel", "dangerously-disable-auth", "noindex", "network"} {
-		words := strings.Split(key, "-")
-		camel := words[0]
-		for _, w := range words[1:] {
-			camel += strings.ToUpper(w[:1]) + w[1:]
-		}
-		spellings[key] = key
-		spellings[camel] = key
-		spellings[strings.Join(words, "_")] = key
-	}
+// loose is a label key without case or separators, so a typo like dangerously-disable-auth can say what was meant
+func loose(key string) string {
+	return strings.ToLower(strings.NewReplacer("-", "", "_", "", ".", "").Replace(key))
 }
 
 // the id names the node's state dir and is the default hostname, so both have to be plain dns labels
@@ -67,7 +58,7 @@ func FromContainers(containers []docker.Container, network string) []App {
 		}
 		s.Container = c.Name
 		var err error
-		if s.Addr, err = addr(c, cmp.Or(s.Network, networkLabel(c.NetworkLabels), network)); err != nil {
+		if s.Addr, err = addr(c, cmp.Or(s.Network, c.NetworkLabels[prefix+"network"], network)); err != nil {
 			s.Err = errors.Join(s.Err, err)
 		}
 		if s.ID != "" {
@@ -99,27 +90,25 @@ func FromContainers(containers []docker.Container, network string) []App {
 func parse(labels map[string]string) (App, bool) {
 	var s App
 	values := map[string]string{}
-	seen := map[string]string{}
 	var errs []error
+	found := false
 	for label, value := range labels {
-		raw, ok := strings.CutPrefix(label, prefix)
+		key, ok := strings.CutPrefix(label, prefix)
 		if !ok {
 			continue
 		}
-		key, ok := spellings[raw]
-		if !ok {
-			errs = append(errs, fmt.Errorf("unknown label %q", label))
+		found = true
+		if !slices.Contains(keys, key) {
+			err := fmt.Errorf("unknown label %q", label)
+			if i := slices.IndexFunc(keys, func(k string) bool { return loose(k) == loose(key) }); i >= 0 {
+				err = fmt.Errorf("unknown label %q, did you mean %s%s", label, prefix, keys[i])
+			}
+			errs = append(errs, err)
 			continue
 		}
-		if other, ok := seen[key]; ok {
-			a, b := min(other, label), max(other, label)
-			errs = append(errs, fmt.Errorf("labels %q and %q are the same key", a, b))
-			continue
-		}
-		seen[key] = label
 		values[key] = value
 	}
-	if len(seen) == 0 && len(errs) == 0 {
+	if !found {
 		return s, false
 	}
 
@@ -148,7 +137,7 @@ func parse(labels map[string]string) (App, bool) {
 	}
 
 	s.Noindex = true
-	for key, dst := range map[string]*bool{"funnel": &s.Funnel, "dangerously-disable-auth": &s.DangerouslyDisableAuth, "noindex": &s.Noindex} {
+	for key, dst := range map[string]*bool{"funnel": &s.Funnel, "dangerouslyDisableAuth": &s.DangerouslyDisableAuth, "noindex": &s.Noindex} {
 		v, ok := values[key]
 		if !ok {
 			continue
@@ -159,13 +148,13 @@ func parse(labels map[string]string) (App, bool) {
 		case "false":
 			*dst = false
 		default:
-			errs = append(errs, fmt.Errorf("%s=%q must be true or false", seen[key], v))
+			errs = append(errs, fmt.Errorf("%s%s=%q must be true or false", prefix, key, v))
 		}
 	}
 
 	if v, ok := values["network"]; ok {
 		if v == "" {
-			errs = append(errs, fmt.Errorf("%s is empty", seen["network"]))
+			errs = append(errs, errors.New("tailgate.network is empty"))
 		}
 		s.Network = v
 	}
@@ -175,17 +164,6 @@ func parse(labels map[string]string) (App, bool) {
 		s.Err = errors.Join(errs...)
 	}
 	return s, true
-}
-
-// networkLabel is tailgate.network in any spelling, for the container another
-// one shares its network with
-func networkLabel(labels map[string]string) string {
-	for label, value := range labels {
-		if raw, ok := strings.CutPrefix(label, prefix); ok && spellings[raw] == "network" {
-			return value
-		}
-	}
-	return ""
 }
 
 // addr is the IP to reach c at on network, or on its first network by name

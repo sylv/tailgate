@@ -25,8 +25,7 @@ var apiBase = "https://api.tailscale.com/api/v2"
 var errNotFound = errors.New("not found")
 
 // API is the tailscale API through an oauth client. tailgate uses it to make
-// auth keys for new nodes, to manage its tailscale services and to notice
-// devices and tailscale services deleted in the admin console
+// auth keys for new nodes and to manage its tailscale services
 type API struct {
 	secret string
 
@@ -38,7 +37,7 @@ type API struct {
 }
 
 // scopes is exactly what tailgate needs, so a leaked secret can't do more
-var scopes = []string{"auth_keys", "devices:core:read", "services"}
+var scopes = []string{"auth_keys", "services"}
 
 // NewAPI checks the oauth client and reads which tailscale services are tailgate's
 func NewAPI(ctx context.Context, secret string) (*API, error) {
@@ -50,7 +49,7 @@ func NewAPI(ctx context.Context, secret string) (*API, error) {
 	got, tags := strings.Fields(tok.Scope), strings.Fields(tok.Tags)
 	slices.Sort(got)
 	if !slices.Equal(got, scopes) || !slices.Equal(tags, []string{tag}) {
-		return nil, fmt.Errorf("the oauth client has to have exactly auth keys and services with write access and devices core with read access, tagged %s. it has %q tagged %q", tag, tok.Scope, tok.Tags)
+		return nil, fmt.Errorf("the oauth client has to have exactly auth keys and services with write access, tagged %s. it has %q tagged %q", tag, tok.Scope, tok.Tags)
 	}
 	if a.ours, err = a.services(ctx); err != nil {
 		return nil, err
@@ -73,29 +72,6 @@ func (a *API) services(ctx context.Context) (map[string]bool, error) {
 		}
 	}
 	return ours, nil
-}
-
-func (a *API) forget(name string) {
-	a.mu.Lock()
-	delete(a.ours, name)
-	a.mu.Unlock()
-}
-
-// devices lists the stable ids of the devices in the tailnet
-func (a *API) devices(ctx context.Context) (map[string]bool, error) {
-	var list struct {
-		Devices []struct {
-			NodeID string `json:"nodeId"`
-		} `json:"devices"`
-	}
-	if err := a.do(ctx, http.MethodGet, "/tailnet/-/devices", nil, &list); err != nil {
-		return nil, fmt.Errorf("listing devices failed: %w", err)
-	}
-	ids := map[string]bool{}
-	for _, d := range list.Devices {
-		ids[d.NodeID] = true
-	}
-	return ids, nil
 }
 
 // authKey makes a single use auth key for one new node. Under tailnet lock

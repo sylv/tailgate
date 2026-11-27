@@ -4,7 +4,7 @@ import { PageHeader, useAdmin } from "../components/admin-shell";
 import { Empty, List, Section } from "../components/section";
 import { Note } from "../components/note";
 import { nodeStatus, appStatus, StatusRing, type Status } from "../components/apps/status";
-import { until } from "../lib/time";
+import { Until } from "../lib/time";
 import { cn } from "../lib/utils";
 import { Button } from "../ui/button";
 import { CopyField } from "../ui/copy-field";
@@ -15,7 +15,6 @@ const COLUMNS = "md:grid-cols-[minmax(0,1fr)_9rem_5rem_1.25rem]";
 export function AppsRoute() {
   const { apps } = useAdmin();
   if (!apps) return null;
-  const funnel = apps.apps.some((s) => s.funnel && !s.error);
 
   return (
     <>
@@ -37,7 +36,7 @@ export function AppsRoute() {
           name="tailgate"
           url={apps.tailgate.url}
           details={["This page and the login"]}
-          reach={funnel ? "Funnel" : "Tailnet"}
+          reach={apps.tailgate.funnelOn ? "Funnel" : "Tailnet"}
           status={nodeStatus(apps.tailgate)}
         >
           <NodeNotes node={apps.tailgate} />
@@ -67,7 +66,7 @@ function AppRow({ app: s }: { app: App }) {
       name={s.hostname || s.id || s.container}
       url={s.url}
       details={details}
-      reach={s.error ? undefined : s.funnel ? "Funnel" : "Tailnet"}
+      reach={s.error ? undefined : s.funnelOn ? "Funnel" : "Tailnet"}
       login={s.error ? undefined : s.dangerouslyDisableAuth ? "Off" : "On"}
       status={appStatus(s)}
     >
@@ -179,7 +178,11 @@ function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
         node.nodeError && (
           <Note tone={node.state === "cert pending" ? "warning" : "danger"}>
             <span className="block">{node.nodeError}</span>
-            {node.retryAt && <span className="mt-1 block">Trying again {until(node.retryAt)}</span>}
+            {node.retryAt && (
+              <span className="mt-1 block">
+                Trying again <Until seconds={node.retryAt} />
+              </span>
+            )}
           </Note>
         )
       )}
@@ -193,35 +196,28 @@ function NodeNotes({ node, id }: { node: NodeInfo; id?: string }) {
   );
 }
 
-// nodes and tailscale services no container uses anymore. tailgate can't delete devices,
+// nodes no container uses anymore, by their app's id. tailgate can't delete devices,
 // so it waits for them to be deleted in the admin console and then forgets them
 function LeftInTailscale({ names }: { names: string[] }) {
   return (
     <Section
       className="mt-8"
       title="Left in Tailscale"
-      description="No container uses these anymore. Delete them in the Tailscale admin console and tailgate forgets them within a minute"
+      description="No container uses these nodes anymore. Delete their devices in the Tailscale admin console and tailgate forgets them"
     >
       <List>
-        {names.map((name) => {
-          // tailscale services are named like svc:photos, nodes by their app's id
-          const app = name.startsWith("svc:");
-          return (
-            <Row
-              key={name}
-              name={name}
-              details={[app ? "Tailscale service" : "Node"]}
-              status={{ tone: "unused", icon: "alert", label: "Unused" }}
-            >
-              <ExternalLink
-                href={`https://login.tailscale.com/admin/${app ? "apps" : "machines"}`}
-                className="text-[13px]"
-              >
-                Delete it in the admin console
-              </ExternalLink>
-            </Row>
-          );
-        })}
+        {names.map((name) => (
+          <Row
+            key={name}
+            name={name}
+            details={["Node"]}
+            status={{ tone: "unused", icon: "alert", label: "Unused" }}
+          >
+            <ExternalLink href="https://login.tailscale.com/admin/machines" className="text-[13px]">
+              Delete it in the admin console
+            </ExternalLink>
+          </Row>
+        ))}
       </List>
     </Section>
   );

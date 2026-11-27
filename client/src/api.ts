@@ -23,8 +23,19 @@ export interface Login {
   name: string;
 }
 
+export interface Passkey {
+  id: string;
+  // the authenticator model, named from lib/aaguids.json
+  aaguid: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  // the browser it was last used from
+  userAgent: string;
+}
+
 export interface UserDetail extends User {
   keys: Key[];
+  passkeys: Passkey[];
   logins: Login[];
 }
 
@@ -32,11 +43,16 @@ export interface Me {
   user: User | null;
   via?: "session" | "key" | "tailnet";
   login?: string;
-  // funnel is whether an app can be opened from the internet
+  // url is "" until the app is online, funnel is whether it can be opened from the internet
   apps: { name: string; url: string; funnel: boolean }[];
   // the app from ?to=, and why it can't be signed in to
   target?: string;
   error?: string;
+  // how the user signs in
+  keys?: Key[];
+  passkeys?: Passkey[];
+  // TAILGATE_PASSKEYS
+  passkeysOn: boolean;
   ingress: "tailnet" | "funnel";
   requestId: string;
 }
@@ -47,6 +63,8 @@ export interface NewKey {
 
 export interface NodeInfo {
   state?: string;
+  // whether funnel is really on, not just asked for
+  funnelOn?: boolean;
   url?: string;
   signCommand?: string;
   nodeError?: string;
@@ -96,6 +114,8 @@ export interface Effect {
   name?: string;
   value?: string;
   status?: number;
+  // set-request-header only, removes the client's own value from every request
+  strip?: boolean;
 }
 
 export interface Rule {
@@ -118,6 +138,8 @@ export interface RuleError {
 
 export interface RuleList {
   rules: Rule[];
+  // a hash of the saved rules, sent back with a save so a stale page can't overwrite them
+  version: string;
   // why the saved rules can't be loaded
   error?: string;
   // what stopped a save

@@ -128,7 +128,7 @@ func TestSessions(t *testing.T) {
 		t.Fatalf("got %+v, %v", u, err)
 	}
 
-	parent, err := s.CreateSession(id, keyID, "", "")
+	parent, err := s.CreateSession(id, Cred{KeyID: keyID}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestSessions(t *testing.T) {
 	if _, err := s.Session(parent, "photos"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("session on another host got %v", err)
 	}
-	child, err := s.CreateSession(id, keyID, "photos", ps.ID)
+	child, err := s.CreateSession(id, Cred{KeyID: keyID}, "photos", ps.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestSessions(t *testing.T) {
 	}
 
 	// revoking a key ends its sessions, and resetting revokes every key
-	parent, _ = s.CreateSession(id, keyID, "", "")
+	parent, _ = s.CreateSession(id, Cred{KeyID: keyID}, "", "")
 	if _, err := s.ResetKeys(id); err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +167,32 @@ func TestSessions(t *testing.T) {
 		t.Fatalf("old key after reset got %v", err)
 	}
 
+	// sessions end at their max age however much they're used
+	key, _ = s.AddKey(id, "")
+	_, keyID, _ = s.KeyUser(key)
+	parent, _ = s.CreateSession(id, Cred{KeyID: keyID}, "", "")
+	s.db.Exec(`UPDATE sessions SET created_at = created_at - ?`, int64(SessionMaxAge.Seconds()))
+	if _, err := s.Session(parent, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session past its max age got %v", err)
+	}
+
+	// resetting keys removes passkeys and their sessions too
+	if err := s.AddPasskey(id, []byte("cred"), []byte("{}"), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	pk, _, _ := s.PasskeyUser([]byte("cred"))
+	parent, _ = s.CreateSession(id, Cred{PasskeyID: pk}, "", "")
+	if _, err := s.ResetKeys(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Session(parent, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("passkey session after reset got %v", err)
+	}
+
 	// deleting the user ends everything
 	key, _ = s.AddKey(id, "")
 	_, keyID, _ = s.KeyUser(key)
-	parent, _ = s.CreateSession(id, keyID, "", "")
+	parent, _ = s.CreateSession(id, Cred{KeyID: keyID}, "", "")
 	if err := s.DeleteUser(id); err != nil {
 		t.Fatal(err)
 	}

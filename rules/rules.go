@@ -53,6 +53,9 @@ type Effect struct {
 	// Value is the message, URL or header value, as an expression
 	Value  string `json:"value,omitempty"`
 	Status int    `json:"status,omitempty"`
+	// Strip removes the client's own value of a set-request-header's header from every
+	// request, also when the rule doesn't match, so a client can't send one the app trusts
+	Strip bool `json:"strip,omitempty"`
 }
 
 // Request is every value a rule sees except user
@@ -191,6 +194,8 @@ func Check(section, src string, asBool bool) *Error {
 
 type Set struct {
 	sections map[string][]*compiled
+	// strip is the request headers the client's values are removed from, see Effect.Strip
+	strip []string
 }
 
 type compiled struct {
@@ -240,6 +245,9 @@ func Compile(rules []Rule) (*Set, []Error) {
 				ending++
 			case SetRequestHeader, RemoveRequestHeader, SetResponseHeader, RemoveResponseHeader:
 				name := http.CanonicalHeaderKey(e.Name)
+				if e.Strip && e.Type == SetRequestHeader && r.Mode == "on" {
+					s.strip = append(s.strip, name)
+				}
 				switch {
 				case !httpguts.ValidHeaderFieldName(e.Name):
 					fail(field, Error{Message: "That isn't a valid header name"})
@@ -278,6 +286,7 @@ func Compile(rules []Rule) (*Set, []Error) {
 type Result struct {
 	// End is set by the block or redirect that ends the request
 	End     *End
+	strip   []string
 	headers []header
 	// Logged has what each matching log only rule would have done
 	Logged []string
@@ -298,6 +307,9 @@ type header struct {
 
 // ApplyRequest changes the request to the app
 func (res *Result) ApplyRequest(h http.Header) {
+	for _, name := range res.strip {
+		h.Del(name)
+	}
 	for _, op := range res.headers {
 		switch {
 		case op.response:
@@ -326,6 +338,7 @@ func (res *Result) ApplyResponse(h http.Header) {
 
 // Run runs one section's rules until one ends the request or skips the rest
 func (s *Set) Run(section string, req Request, u User, res *Result) error {
+	res.strip = s.strip
 	var e any = env[User]{req, u}
 	if section == Pre {
 		e = env[preUser]{req, preUser{u.SignedIn}}

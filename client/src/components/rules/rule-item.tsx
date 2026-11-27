@@ -11,6 +11,7 @@ import type { FC, ReactNode } from "react";
 import type { Effect, Rule, RuleError, Schema } from "../../api";
 import { cn } from "../../lib/utils";
 import { Button } from "../../ui/button";
+import { Checkbox } from "../../ui/checkbox";
 import { IconButton } from "../../ui/icon-button";
 import { Input } from "../../ui/input";
 import { Segmented } from "../../ui/segmented";
@@ -193,7 +194,13 @@ export const RuleEditor: FC<{
                   label="Effect"
                   value={e.type}
                   options={effectTypes}
-                  onValueChange={(type) => setEffect(i, { type })}
+                  // a new header to the app replaces whatever the client sent unless the admin says otherwise
+                  onValueChange={(type) =>
+                    setEffect(i, {
+                      type,
+                      strip: type === "set-request-header" ? (e.strip ?? true) : undefined,
+                    })
+                  }
                   className="w-48"
                 />
                 {e.type.endsWith("-header") && (
@@ -236,6 +243,15 @@ export const RuleEditor: FC<{
                     <XIcon />
                   </IconButton>
                 )}
+                {e.type === "set-request-header" && (
+                  <Checkbox
+                    className="basis-full"
+                    label="Remove the client's value on every request"
+                    description="Even when this rule doesn't match, so nobody can send their own to the app"
+                    checked={!!e.strip}
+                    onCheckedChange={(strip) => setEffect(i, { strip })}
+                  />
+                )}
               </div>
             ))}
             <Button
@@ -243,7 +259,9 @@ export const RuleEditor: FC<{
               size="sm"
               icon={<PlusIcon />}
               className="w-fit"
-              onClick={() => onChange({ effects: [...rule.effects, { type: "set-request-header" }] })}
+              onClick={() =>
+                onChange({ effects: [...rule.effects, { type: "set-request-header", strip: true }] })
+              }
             >
               Add effect
             </Button>

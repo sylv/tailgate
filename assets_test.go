@@ -7,34 +7,18 @@ import (
 )
 
 func TestAssets(t *testing.T) {
-	assets := loadAssets(fstest.MapFS{
-		"assets/index.js":     {Data: []byte("original js")},
-		"assets/index.js.br":  {Data: []byte("br")},
-		"assets/index.js.gz":  {Data: []byte("gzip!")},
-		"assets/index.js.zst": {Data: []byte("zstd")},
-		"assets/tiny.css":     {Data: []byte("a{}")},
-	})
-	for _, c := range []struct {
-		path, accept, want, body string
-	}{
-		{"/assets/index.js", "gzip, deflate, br, zstd", "br", "br"},
-		{"/assets/index.js", "gzip, zstd", "zstd", "zstd"},
-		{"/assets/index.js", "gzip, br;q=0", "gzip", "gzip!"},
-		{"/assets/index.js", "", "", "original js"},
-		{"/assets/tiny.css", "br", "", "a{}"},
-	} {
-		req := httptest.NewRequest("GET", c.path, nil)
-		req.Header.Set("Accept-Encoding", c.accept)
+	h := assets(fstest.MapFS{"assets/index.js": {Data: []byte("js")}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/assets/index.js", nil))
+	if rec.Code != 200 || rec.Body.String() != "js" || rec.Header().Get("Content-Type") != "text/javascript; charset=utf-8" || rec.Header().Get("Cache-Control") == "" {
+		t.Errorf("got %d %q %v", rec.Code, rec.Body, rec.Header())
+	}
+	// a missing file or the folder isn't cached for good
+	for _, path := range []string{"/assets/gone.js", "/assets/"} {
 		rec := httptest.NewRecorder()
-		assets[c.path].serve(rec, req)
-		if got := rec.Header().Get("Content-Encoding"); got != c.want || rec.Body.String() != c.body {
-			t.Errorf("%s %q: got %q %q, want %q", c.path, c.accept, got, rec.Body, c.want)
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 404 || rec.Header().Get("Cache-Control") != "" {
+			t.Errorf("%s got %d %v", path, rec.Code, rec.Header())
 		}
-	}
-	if ct := assets["/assets/index.js"].contentType; ct != "text/javascript; charset=utf-8" {
-		t.Errorf("got content type %q", ct)
-	}
-	if assets["/assets/index.js.br"] != nil {
-		t.Error("a compressed copy is served on its own path")
 	}
 }

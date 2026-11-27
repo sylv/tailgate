@@ -76,7 +76,10 @@ function Rules({ initial, schema }: { initial: RuleList; schema: Schema }) {
     setBusy(true);
     setSaveError("");
     try {
-      const res = await api<RuleList>("PUT", "/api/admin/rules", { rules: strip(ordered) });
+      const res = await api<RuleList>("PUT", "/api/admin/rules", {
+        rules: strip(ordered),
+        version: saved.version,
+      });
       if (res.errors?.length) {
         const byKey: Record<string, RuleError[]> = {};
         for (const e of res.errors) (byKey[ordered[e.rule].key] ??= []).push(e);

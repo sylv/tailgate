@@ -6,6 +6,7 @@ import "./globals.css";
 import { DashboardRoute } from "./routes/dashboard";
 import { LoginRoute } from "./routes/login";
 import { setFavicon } from "./ui/logo";
+import { TooltipProvider } from "./ui/tooltip";
 
 // the admin pages are their own chunk, funnel visitors never load them
 const AdminRoutes = lazy(() => import("./routes/admin"));
@@ -16,15 +17,17 @@ setFavicon();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
-      <Suspense>
-        <Routes>
-          <Route path="/" element={<DashboardRoute />} />
-          <Route path="/login" element={<LoginRoute />} />
-          <Route path="/oidc/authorize" element={<LoginRoute />} />
-          <Route path="/setup" element={<SetupRoute />} />
-          <Route path="/admin/*" element={<AdminRoutes />} />
-        </Routes>
-      </Suspense>
+      <TooltipProvider>
+        <Suspense>
+          <Routes>
+            <Route path="/" element={<DashboardRoute />} />
+            <Route path="/login" element={<LoginRoute />} />
+            <Route path="/oidc/authorize" element={<LoginRoute />} />
+            <Route path="/setup" element={<SetupRoute />} />
+            <Route path="/admin/*" element={<AdminRoutes />} />
+          </Routes>
+        </Suspense>
+      </TooltipProvider>
     </BrowserRouter>
   </StrictMode>,
 );

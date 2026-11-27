@@ -9,6 +9,15 @@ RUN pnpm install --frozen-lockfile
 COPY client client
 RUN pnpm --filter client build
 
+# db-ip publishes each month's country database early on the 1st, so last month's is the
+# fallback until then. GEOIP_MONTH changes the layer each month, a rebuild picks up the new one
+FROM --platform=$BUILDPLATFORM golang:1-trixie AS geoip
+ARG GEOIP_MONTH
+RUN month=${GEOIP_MONTH:-$(date -u +%Y-%m)} && \
+    { curl -fsSL "https://download.db-ip.com/free/dbip-country-lite-$month.mmdb.gz" || \
+      curl -fsSL "https://download.db-ip.com/free/dbip-country-lite-$(date -u -d "$month-01 -1 month" +%Y-%m).mmdb.gz"; } | \
+    gunzip > /dbip-country-lite.mmdb
+
 FROM --platform=$BUILDPLATFORM golang:1-trixie AS builder
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev
@@ -25,6 +34,7 @@ RUN TS=$(go list -m -f '{{.Version}}' tailscale.com | sed 's/^v//') && \
 
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /tailgate /usr/local/bin/tailgate
+COPY --from=geoip /dbip-country-lite.mmdb /usr/share/tailgate/dbip-country-lite.mmdb
 # a named volume copies these owners, so the nonroot user can write to them
 COPY --from=builder --chown=65532:65532 /data /data
 COPY --from=builder --chown=65532:65532 /run/tailgate /run/tailgate

@@ -5,7 +5,7 @@ import { PageHeader } from "../components/admin-shell";
 import { Confirm } from "../components/confirm";
 import { ClientForm, type Created } from "../components/oidc/client-form";
 import { Empty, ErrorText, List, Row } from "../components/section";
-import { POLL, useLoad } from "../hooks/use-load";
+import { useLoad } from "../hooks/use-load";
 import { Button } from "../ui/button";
 import { CopyField } from "../ui/copy-field";
 import { Dialog } from "../ui/dialog";
@@ -14,7 +14,7 @@ import { Labelled } from "../ui/input";
 const blank: OIDCClient = { id: "", name: "", app: "", redirectURIs: [], createdAt: 0 };
 
 export function OIDCRoute() {
-  const [list, error, reload] = useLoad(() => api<OIDCClients>("GET", "/api/admin/oidc-clients"), POLL);
+  const [list, error, reload] = useLoad(() => api<OIDCClients>("GET", "/api/admin/oidc-clients"), true);
   // "new" while adding, else the id of the client being edited
   const [open, setOpen] = useState<string>();
   const [created, setCreated] = useState<Created>();

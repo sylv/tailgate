@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sylv/tailgate/app"
@@ -33,7 +36,8 @@ func newTestGate(t *testing.T) *testGate {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	tg := &testGate{gate: newGate(db, nil)}
+	tg := &testGate{gate: newGate(db)}
+	tg.signer = testKey()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { tg.got = r }))
 	t.Cleanup(upstream.Close)
 	addr, port, _ := strings.Cut(strings.TrimPrefix(upstream.URL, "http://"), ":")
@@ -43,8 +47,10 @@ func newTestGate(t *testing.T) *testGate {
 		"open":   {ID: "open", Hostname: "open", Addr: addr, Port: p, DangerouslyDisableAuth: true},
 		"lyra":   {ID: "lyra", Hostname: "lyra"},
 	}
-	tg.hosts = func(name string) string {
-		return map[string]string{"": "tailgate.ts.net", "photos": "photos.ts.net", "open": "open.ts.net"}[name]
+	tg.selfHost = func() string { return "tailgate.ts.net" }
+	tg.appStatus = func(id string) (node.Status, bool) {
+		host, ok := map[string]string{"photos": "photos.ts.net", "open": "open.ts.net"}[id]
+		return node.Status{State: node.Online, DNSName: host}, ok
 	}
 	tg.gate.peer = func(context.Context) (*node.Peer, error) { return tg.peer, nil }
 	tg.web, tg.funnel, tg.photos, tg.open = tg.gate.web(false), tg.gate.web(true), tg.appHandler("photos"), tg.appHandler("open")
@@ -75,10 +81,35 @@ func cookie(rec *httptest.ResponseRecorder) string {
 
 func page() http.Header { return http.Header{"Sec-Fetch-Mode": {"navigate"}} }
 
+var testKey = sync.OnceValue(func() *rsa.PrivateKey {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	return key
+})
+
+// signIn goes from an app's page through the login page to its callback, like a browser
+// signed in on the tailgate node, and returns the callback url and the app's state cookie
+func (tg *testGate) signIn(t *testing.T, path string, signedIn http.Header) (*url.URL, http.Header) {
+	t.Helper()
+	rec := do(tg.photos, "GET", "https://photos.ts.net"+path, page())
+	var state string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == stateCookie {
+			state = c.Value
+		}
+	}
+	login, _ := url.Parse(rec.Header().Get("Location"))
+	rec = do(tg.web, "GET", "https://tailgate.ts.net"+login.RequestURI(), signedIn)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if rec.Code != http.StatusFound || loc.Host != "photos.ts.net" || loc.Path != callbackPath || state == "" {
+		t.Fatalf("login got %d %q", rec.Code, loc)
+	}
+	return loc, http.Header{"Cookie": {stateCookie + "=" + state}, "Sec-Fetch-Mode": {"navigate"}}
+}
+
 func TestSignedOut(t *testing.T) {
 	tg := newTestGate(t)
 	rec := do(tg.photos, "GET", "https://photos.ts.net/albums/1?sort=new", page())
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://tailgate.ts.net/login?to=photos%3A%2Falbums%2F1%3Fsort%3Dnew" {
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusFound || !strings.HasPrefix(loc, "https://tailgate.ts.net/login?state=") || !strings.HasSuffix(loc, "&to=photos%3A%2Falbums%2F1%3Fsort%3Dnew") {
 		t.Fatalf("page navigation got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 	rec = do(tg.photos, "GET", "https://photos.ts.net/api/albums", nil)
@@ -117,23 +148,29 @@ func TestLoginFlow(t *testing.T) {
 		t.Fatalf("open redirect to %q", rec.Header().Get("Location"))
 	}
 
+	// a link to the login page that didn't come from the app goes through the app for a state cookie
 	rec = do(tg.web, "GET", "https://tailgate.ts.net/login?to="+url.QueryEscape("photos:/albums?x=1"), signedIn)
-	loc, _ := url.Parse(rec.Header().Get("Location"))
-	if rec.Code != http.StatusFound || loc.Host != "photos.ts.net" || loc.Path != callbackPath {
-		t.Fatalf("login got %d %q", rec.Code, loc)
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusFound || loc != "https://photos.ts.net/albums?x=1" {
+		t.Fatalf("login without state got %d %q", rec.Code, loc)
 	}
+
+	loc, state := tg.signIn(t, "/albums?x=1", signedIn)
 	// a code only works on the host it was made for, and only once
-	if rec := do(tg.appHandler("lyra"), "GET", "https://lyra.ts.net"+loc.RequestURI(), page()); rec.Code != http.StatusNotFound {
+	if rec := do(tg.appHandler("lyra"), "GET", "https://lyra.ts.net"+loc.RequestURI(), state); rec.Code != http.StatusNotFound {
 		t.Fatalf("code on another host got %d", rec.Code)
 	}
-	rec = do(tg.web, "GET", "https://tailgate.ts.net/login?to="+url.QueryEscape("photos:/albums?x=1"), signedIn)
-	loc, _ = url.Parse(rec.Header().Get("Location"))
-	rec = do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), page())
+	loc, state = tg.signIn(t, "/albums?x=1", signedIn)
+	// someone else's browser doesn't get a session from the link, it's sent back to sign in itself
+	if rec := do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), http.Header{"Cookie": {stateCookie + "=other"}}); cookie(rec) != "" || rec.Header().Get("Location") != "/albums?x=1" {
+		t.Fatalf("callback in another browser got %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	loc, state = tg.signIn(t, "/albums?x=1", signedIn)
+	rec = do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), state)
 	app := cookie(rec)
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/albums?x=1" || app == "" {
 		t.Fatalf("callback got %d %q", rec.Code, rec.Header().Get("Location"))
 	}
-	if rec := do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), page()); rec.Code != http.StatusNotFound {
+	if rec := do(tg.photos, "GET", "https://photos.ts.net"+loc.RequestURI(), state); rec.Code != http.StatusNotFound {
 		t.Fatalf("reused code got %d", rec.Code)
 	}
 
@@ -172,6 +209,7 @@ func TestKeys(t *testing.T) {
 		wantAuth string
 	}{
 		{http.Header{"Authorization": {"Bearer " + tg.key}}, ""},
+		{http.Header{"Authorization": {"Bearer  " + tg.key + " "}}, ""},
 		{http.Header{keyHeader: {tg.key}, "Authorization": {"Basic YXBwOmFwcA=="}}, "Basic YXBwOmFwcA=="},
 	} {
 		tg.got = nil
@@ -198,6 +236,11 @@ func TestLinkedLogin(t *testing.T) {
 	tg.peer = &node.Peer{LoginID: 7, Login: "ezra@"}
 	if rec := do(tg.photos, "GET", "https://photos.ts.net/", nil); rec.Code != http.StatusOK {
 		t.Fatalf("linked login got %d", rec.Code)
+	}
+	// an admin signed in by their tailnet login has to sign in with a key for the admin pages
+	tg.db.SetAdmin(id, true)
+	if rec := do(tg.web, "GET", "https://tailgate.ts.net/api/admin/users", nil); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "key") {
+		t.Fatalf("tailnet admin got %d %s", rec.Code, rec.Body)
 	}
 	tg.peer = &node.Peer{LoginID: 7, Login: "ezra@", Tags: []string{"tag:server"}}
 	if rec := do(tg.photos, "GET", "https://photos.ts.net/", nil); rec.Code != http.StatusUnauthorized {
@@ -346,31 +389,37 @@ func TestSaveRules(t *testing.T) {
 	id, _ := tg.db.UserIDByName("ezra")
 	tg.db.SetAdmin(id, true)
 	_, keyID, _ := tg.db.KeyUser(tg.key)
-	session, _ := tg.db.CreateSession(id, keyID, "", "")
-	save := func(body string) ruleList {
+	session, _ := tg.db.CreateSession(id, store.Cred{KeyID: keyID}, "", "")
+	save := func(body string, status int) ruleList {
 		req := httptest.NewRequest("PUT", "https://tailgate.ts.net/api/admin/rules", strings.NewReader(body))
 		req.Header = http.Header{"Origin": {"https://tailgate.ts.net"}, "Content-Type": {"application/json"}, "Cookie": {cookieName + "=" + session}}
 		rec := httptest.NewRecorder()
 		tg.web.ServeHTTP(rec, req)
 		var res ruleList
-		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != status {
 			t.Fatalf("got %d %s", rec.Code, rec.Body)
 		}
 		return res
 	}
-	res := save(`{"rules":[{"section":"pre","name":"x","condition":"user.name == \"ezra\"","effects":[{"type":"block"}],"mode":"on"}]}`)
+	empty := rulesVersion(nil)
+	res := save(`{"version":"`+empty+`","rules":[{"section":"pre","name":"x","condition":"user.name == \"ezra\"","effects":[{"type":"block"}],"mode":"on"}]}`, http.StatusOK)
 	if len(res.Errors) != 1 || res.Errors[0].Field != "condition" {
 		t.Fatalf("got %+v", res)
 	}
 	if list, _ := tg.db.Rules(); len(list) != 0 {
 		t.Fatal("a rule that doesn't compile was saved")
 	}
-	res = save(`{"rules":[{"section":"pre","name":"x","condition":"path == \"/x\"","effects":[{"type":"block"}],"mode":"on"}]}`)
+	res = save(`{"version":"`+empty+`","rules":[{"section":"pre","name":"x","condition":"path == \"/x\"","effects":[{"type":"block"}],"mode":"on"}]}`, http.StatusOK)
 	if len(res.Errors) != 0 || res.Rules[0].ID == "" {
 		t.Fatalf("got %+v", res)
 	}
 	if rec := do(tg.open, "GET", "https://open.ts.net/x", nil); rec.Code != http.StatusForbidden {
 		t.Errorf("a saved rule didn't apply, got %d", rec.Code)
+	}
+	// a page that loaded the rules before that save can't overwrite it
+	save(`{"version":"`+empty+`","rules":[]}`, http.StatusConflict)
+	if list, _ := tg.db.Rules(); len(list) != 1 {
+		t.Fatal("a stale save replaced the rules")
 	}
 }
 

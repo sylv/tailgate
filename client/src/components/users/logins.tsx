@@ -4,13 +4,11 @@ import { Button } from "../../ui/button";
 import { Select } from "../../ui/select";
 import { ErrorText, List, Row, Section } from "../section";
 
-export const Logins: FC<{ user: UserDetail; logins: Login[]; reload: () => void }> = ({
-  user,
-  logins,
-  reload,
-}) => {
+export const Logins: FC<{ user: UserDetail; reload: () => void }> = ({ user, reload }) => {
   const [error, setError] = useState("");
-  const linkable = logins.filter((l) => !user.logins.some((ul) => ul.id === l.id));
+  // the tailnet's logins are only read when the picker opens
+  const [logins, setLogins] = useState<Login[]>();
+  const linkable = logins?.filter((l) => !user.logins.some((ul) => ul.id === l.id)) ?? [];
 
   async function run(f: () => Promise<unknown>) {
     setError("");
@@ -44,28 +42,27 @@ export const Logins: FC<{ user: UserDetail; logins: Login[]; reload: () => void 
           ))}
         </List>
       )}
-      {linkable.length > 0 ? (
-        <Select
-          label="Link a login"
-          placeholder="Link a login"
-          value={undefined}
-          className="w-fit"
-          options={linkable.map((l) => ({ value: l.id, label: l.name }))}
-          onValueChange={(id) =>
-            run(() =>
-              api(
-                "POST",
-                `/api/admin/users/${user.id}/logins`,
-                linkable.find((l) => l.id === id),
-              ),
-            )
-          }
-        />
-      ) : (
-        user.logins.length === 0 && (
-          <p className="text-[13px] text-fg-faint">No other logins on the tailnet</p>
-        )
-      )}
+      <Select
+        label="Link a login"
+        placeholder="Link a login"
+        value={undefined}
+        className="w-fit"
+        options={linkable.map((l) => ({ value: l.id, label: l.name }))}
+        empty={logins ? "No other logins on the tailnet" : "Loading…"}
+        onOpenChange={(open) =>
+          open &&
+          api<Login[]>("GET", "/api/admin/logins").then(setLogins, (err: Error) => setError(err.message))
+        }
+        onValueChange={(id) =>
+          run(() =>
+            api(
+              "POST",
+              `/api/admin/users/${user.id}/logins`,
+              linkable.find((l) => l.id === id),
+            ),
+          )
+        }
+      />
       <ErrorText>{error}</ErrorText>
     </Section>
   );

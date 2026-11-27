@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -52,8 +53,16 @@ func main() {
 		defer stop()
 		// 65532 is the image's nonroot user, which tailgate runs as
 		err = docker.Proxy(ctx, "/run/tailgate/docker.sock", "/var/run/docker.sock", 65532)
-	case len(args) == 2 && args[0] == "reset-key":
-		err = withUser(args[1], func(db *store.Store, id string) error {
+	case len(args) >= 2 && len(args) <= 3 && args[0] == "reset-key":
+		name, yes := resetArgs(args[1:])
+		if name == "" {
+			usage()
+		}
+		err = withUser(name, func(db *store.Store, id string) error {
+			if !yes {
+				fmt.Fprintf(os.Stderr, "this removes all of %s's keys and passkeys, which signs them out everywhere, and prints one new key. run it again with -y to do it\n", name)
+				os.Exit(1)
+			}
 			key, err := db.ResetKeys(id)
 			fmt.Println(key)
 			return err
@@ -61,13 +70,32 @@ func main() {
 	case len(args) == 3 && args[0] == "set-admin" && (args[2] == "true" || args[2] == "false"):
 		err = withUser(args[1], func(db *store.Store, id string) error { return db.SetAdmin(id, args[2] == "true") })
 	default:
-		fmt.Fprintln(os.Stderr, "usage: tailgate [docker-proxy | reset-key <user> | set-admin <user> true|false]")
-		os.Exit(2)
+		usage()
 	}
 	if err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: tailgate [docker-proxy | reset-key <user> [-y] | set-admin <user> true|false]")
+	os.Exit(2)
+}
+
+// resetArgs reads reset-key's user and -y or --yes, in either order
+func resetArgs(args []string) (name string, yes bool) {
+	for _, a := range args {
+		switch {
+		case a == "-y" || a == "--yes":
+			yes = true
+		case name == "" && !strings.HasPrefix(a, "-"):
+			name = a
+		default:
+			return "", false
+		}
+	}
+	return name, yes
 }
 
 func dataDir() string { return cmp.Or(os.Getenv("TAILGATE_DATA_DIR"), "./data") }
@@ -116,27 +144,42 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	geoDB, err := geo.Open(geo.Path)
+	if err != nil {
+		return fmt.Errorf("opening the geoip database failed, it's built into the image: %w", err)
+	}
+	// db-ip's license needs attribution
+	slog.Info("IP geolocation by DB-IP", "url", "https://db-ip.com")
+	signer, err := db.SigningKey()
+	if err != nil {
+		return err
+	}
 	api, err := node.NewAPI(ctx, secret)
 	if err != nil {
 		return err
 	}
-	nodes := node.NewManager(dataDir(), api)
-	defer nodes.Close()
-	g := newGate(db, nodes)
-	g.geo = geo.Open(dataDir())
-	// db-ip's license needs attribution
-	slog.Info("IP geolocation by DB-IP", "url", "https://db-ip.com")
-	go g.geo.Update(ctx)
-	g.hosts = func(name string) string {
-		if name != "" {
-			st, _ := nodes.Status(name)
-			return st.DNSName
+	changed := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case changed <- struct{}{}:
+		default:
 		}
+	}
+	g := newGate(db)
+	nodes, err := node.NewManager(dataDir(), api, db, g.events.bump, trigger)
+	if err != nil {
+		return err
+	}
+	defer nodes.Close()
+	g.nodes, g.geo, g.signer, g.refresh = nodes, geoDB, signer, trigger
+	g.passkeys, _ = strconv.ParseBool(cmp.Or(os.Getenv("TAILGATE_PASSKEYS"), "true"))
+	g.selfHost = func() string {
 		if self := nodes.Self(); self != nil {
 			return self.Status().DNSName
 		}
 		return ""
 	}
+	g.appStatus = nodes.Status
 	g.peers = func(ctx context.Context) ([]node.Peer, error) { return nodes.Self().Peers(ctx) }
 	self := nodes.StartSelf(hostname, g.web(false), g.web(true))
 	select {
@@ -151,40 +194,12 @@ func run() error {
 		return err
 	}
 	if setupKey == "" {
-		slog.Info("tailgate is ready", "admin", "https://"+g.hosts("")+"/admin")
+		slog.Info("tailgate is ready", "admin", "https://"+g.selfHost()+"/admin")
 	} else {
-		slog.Warn("setup isn't done, so apps and funnel stay off until you open the setup link", "url", "https://"+g.hosts("")+"/setup?key="+setupKey)
+		slog.Warn("setup isn't done, so apps and funnel stay off until you open the setup link", "url", "https://"+g.selfHost()+"/setup?key="+setupKey)
 	}
 
-	changed := make(chan struct{}, 1)
-	trigger := func() {
-		select {
-		case changed <- struct{}{}:
-		default:
-		}
-	}
-	g.refresh = trigger
 	trigger()
-	// the hourly self check, since docker can become unreadable without an event
-	go func() {
-		for range time.Tick(time.Hour) {
-			trigger()
-		}
-	}()
-	// unused nodes and tailscale services are deleted in the tailscale admin console, which tailgate only sees by asking
-	go func() {
-		lastErr := ""
-		for range time.Tick(30 * time.Second) {
-			pruned, err := nodes.Prune(ctx, g.inUse())
-			if msg := fmt.Sprint(err); err != nil && msg != lastErr {
-				slog.Warn("checking for deleted devices failed", "error", msg)
-			}
-			lastErr = fmt.Sprint(err)
-			if pruned {
-				trigger()
-			}
-		}
-	}()
 	go func() {
 		for ctx.Err() == nil {
 			err := dc.Watch(ctx, trigger)
@@ -203,12 +218,13 @@ func run() error {
 			g.mu.Lock()
 			g.dockerErr = err
 			g.mu.Unlock()
+			g.events.bump()
 			if err != nil {
 				// keep what's running, a docker hiccup shouldn't take every app down
 				slog.Error("listing containers failed", "error", err.Error())
 				continue
 			}
-			g.reconcile(app.FromContainers(containers, os.Getenv("TAILGATE_NETWORK")))
+			g.reconcile(ctx, app.FromContainers(containers, os.Getenv("TAILGATE_NETWORK")))
 		case <-ctx.Done():
 			slog.Info("shutting down")
 			return nil
@@ -217,21 +233,30 @@ func run() error {
 }
 
 type gate struct {
-	db        *store.Store
-	nodes     *node.Manager
-	codes     tokens[code]
-	oidcCodes tokens[oidcCode]
-	access    tokens[accessToken]
-	transport *http.Transport
-	rp        *httputil.ReverseProxy
-	// hosts gives an app node's DNS name, or the tailgate node's for "", and "" until it has joined
-	hosts func(name string) string
-	peer  func(context.Context) (*node.Peer, error)
-	peers func(context.Context) ([]node.Peer, error)
+	db         *store.Store
+	nodes      *node.Manager
+	codes      tokens[code]
+	oidcCodes  tokens[oidcCode]
+	access     tokens[accessToken]
+	ceremonies tokens[ceremony]
+	events     events
+	transport  *http.Transport
+	rp         *httputil.ReverseProxy
+	signer     *rsa.PrivateKey
+	// passkeys is TAILGATE_PASSKEYS
+	passkeys bool
+	// selfHost is the tailgate node's DNS name, "" until it has joined
+	selfHost func() string
+	// appStatus is the status of an app's node or tailscale service
+	appStatus func(id string) (node.Status, bool)
+	peer      func(context.Context) (*node.Peer, error)
+	peers     func(context.Context) ([]node.Peer, error)
 	// refresh reads the containers again
 	refresh func()
 	// geo is nil in tests
 	geo *geo.DB
+	// saving is held while the rules are checked and saved
+	saving sync.Mutex
 
 	mu     sync.RWMutex
 	apps   []app.App
@@ -242,11 +267,10 @@ type gate struct {
 	rules     *rules.Set
 	// rulesErr is set when the saved rules can't be loaded, which blocks every app request
 	rulesErr error
-	signer   *rsa.PrivateKey
 }
 
-func newGate(db *store.Store, nodes *node.Manager) *gate {
-	g := &gate{db: db, nodes: nodes, peer: node.PeerOf, refresh: func() {}, routes: map[string]app.App{}}
+func newGate(db *store.Store) *gate {
+	g := &gate{db: db, peer: node.PeerOf, refresh: func() {}, routes: map[string]app.App{}}
 	g.transport, g.rp = newProxy()
 	g.loadRules()
 	return g
@@ -319,7 +343,7 @@ func (g *gate) inUse() map[string]bool {
 }
 
 // reconcile routes every valid app, starts its node and stops the rest
-func (g *gate) reconcile(apps []app.App) {
+func (g *gate) reconcile(ctx context.Context, apps []app.App) {
 	routes := map[string]app.App{}
 	g.mu.RLock()
 	old := map[string]string{}
@@ -389,15 +413,22 @@ func (g *gate) reconcile(apps []app.App) {
 	// funnel visitors have to reach the login page
 	g.nodes.Self().SetFunnel(funnel)
 
-	unused, err := g.nodes.Unused(g.inUse())
-	if err != nil {
-		slog.Error("listing node state dirs failed", "error", err.Error())
-		return
+	// a tailscale service is deleted once no container wants its name, and only then, since
+	// apps with broken labels or waiting for setup keep theirs
+	keep := map[string]bool{}
+	for _, s := range apps {
+		keep[s.Hostname] = true
 	}
+	deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	g.nodes.DeleteServices(deleteCtx, keep)
+
+	unused := g.nodes.Unused(g.inUse())
 	g.mu.Lock()
 	if !slices.Equal(unused, g.unused) && len(unused) > 0 {
-		slog.Info("unused nodes and tailscale services", "unused", unused)
+		slog.Info("unused nodes", "unused", unused)
 	}
 	g.unused = unused
 	g.mu.Unlock()
+	g.events.bump()
 }

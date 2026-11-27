@@ -48,6 +48,7 @@ jobs:
           image=ghcr.io/${GITHUB_REPOSITORY,,}
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "geoip=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
           {
             echo "tags<<EOF"
             echo "$image:latest"
@@ -68,7 +69,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            GEOIP_MONTH=${{ steps.meta.outputs.geoip }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: actions/attest-build-provenance@v3

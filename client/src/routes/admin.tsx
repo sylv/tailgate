@@ -1,11 +1,12 @@
+import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import { api, type Me, type Apps } from "../api";
 import { AdminContext, AdminShell } from "../components/admin-shell";
 import { needsAttention } from "../components/apps/status";
 import { NarrowPage } from "../components/narrow-page";
-import { POLL, useLoad } from "../hooks/use-load";
+import { PasskeyPrompt, SignInForm } from "../components/sign-in";
+import { useLoad } from "../hooks/use-load";
 import { Button } from "../ui/button";
-import { TooltipProvider } from "../ui/tooltip";
 import { OIDCRoute } from "./admin_oidc";
 import { RulesRoute } from "./admin_rules";
 import { AppsRoute } from "./admin_apps";
@@ -14,7 +15,7 @@ import { UsersRoute } from "./admin_users";
 
 export default function AdminRoutes() {
   const [me, meError] = useLoad(() => api<Me>("GET", "/api/me"));
-  const [apps, appsError, reloadApps] = useLoad(() => api<Apps>("GET", "/api/admin/apps"), POLL);
+  const [prompt, setPrompt] = useState(false);
 
   if (meError) return <NarrowPage title="Something went wrong" description={meError} />;
   if (!me) return null;
@@ -35,25 +36,41 @@ export default function AdminRoutes() {
       </NarrowPage>
     );
   }
+  // a tailnet login is any device its owner left unlocked, so changing tailgate takes a key
+  if (me.via === "tailnet") {
+    if (prompt) return <PasskeyPrompt me={me} />;
+    return (
+      <NarrowPage
+        brand
+        me={me}
+        title="Sign in to use the admin pages"
+        description={`You're on the tailnet as ${me.login}. The admin pages need your key or a passkey too`}
+      >
+        <SignInForm me={me} offerPasskey={() => setPrompt(true)} />
+      </NarrowPage>
+    );
+  }
+  return <Admin me={me} />;
+}
 
+function Admin({ me }: { me: Me }) {
+  const [apps, appsError, reloadApps] = useLoad(() => api<Apps>("GET", "/api/admin/apps"), true);
   const appIDs = apps?.apps.filter((s) => !s.error).map((s) => s.id) ?? [];
   const attention = !!apps && needsAttention(apps);
   return (
     <AdminContext value={{ me, apps, reloadApps, appIDs }}>
-      <TooltipProvider>
-        <AdminShell attention={attention} name={me.user.name} canSignOut={me.via !== "tailnet"}>
-          {appsError && <p className="mb-6 text-[13px] text-danger">{appsError}</p>}
-          <Routes>
-            <Route index element={<Navigate to="users" replace />} />
-            <Route path="users" element={<UsersRoute />} />
-            <Route path="users/:id" element={<UserRoute />} />
-            <Route path="apps" element={<AppsRoute />} />
-            <Route path="rules" element={<RulesRoute />} />
-            <Route path="oidc" element={<OIDCRoute />} />
-            <Route path="*" element={<Navigate to="users" replace />} />
-          </Routes>
-        </AdminShell>
-      </TooltipProvider>
+      <AdminShell attention={attention} name={me.user!.name}>
+        {appsError && <p className="mb-6 text-[13px] text-danger">{appsError}</p>}
+        <Routes>
+          <Route index element={<Navigate to="users" replace />} />
+          <Route path="users" element={<UsersRoute />} />
+          <Route path="users/:id" element={<UserRoute />} />
+          <Route path="apps" element={<AppsRoute />} />
+          <Route path="rules" element={<RulesRoute />} />
+          <Route path="oidc" element={<OIDCRoute />} />
+          <Route path="*" element={<Navigate to="users" replace />} />
+        </Routes>
+      </AdminShell>
     </AdminContext>
   );
 }

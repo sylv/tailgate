@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -25,10 +26,8 @@ type request struct {
 	// rule is the rule that blocked or redirected the request
 	rule    string
 	ruleErr string
-	// identify reads the credentials once, a funnel request runs it for the rules and again for the page
-	identified bool
-	ident      *identity
-	identErr   error
+	// ident is who's signed in on the tailgate node, nil when nobody is, see web
+	ident *identity
 }
 
 type requestKey struct{}
@@ -48,7 +47,8 @@ func requests(h http.Handler) http.Handler {
 		rec := &recorder{ResponseWriter: w}
 		start := time.Now()
 		h.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestKey{}, req)))
-		attrs := []any{"request_id", req.id, "ingress", node.Ingress(r.Context()), "host", r.Host, "method", r.Method, "path", r.URL.Path, "status", rec.status, "duration_ms", time.Since(start).Milliseconds()}
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		attrs := []any{"request_id", req.id, "ingress", node.Ingress(r.Context()), "ip", ip, "host", r.Host, "method", r.Method, "path", r.URL.Path, "status", rec.status, "duration_ms", time.Since(start).Milliseconds()}
 		if req.user != "" {
 			attrs = append(attrs, "user", req.user, "via", req.via)
 		}

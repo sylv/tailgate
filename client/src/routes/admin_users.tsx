@@ -4,12 +4,12 @@ import { api, type UserDetail } from "../api";
 import { PageHeader } from "../components/admin-shell";
 import { Empty, ErrorText, List } from "../components/section";
 import { accessText } from "../components/users/access";
-import { POLL, useLoad } from "../hooks/use-load";
-import { ago } from "../lib/time";
+import { useLoad } from "../hooks/use-load";
+import { Ago } from "../lib/time";
 import { Button } from "../ui/button";
 
 export function UsersRoute() {
-  const [users, error] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), POLL);
+  const [users, error] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), true);
   return (
     <>
       <PageHeader
@@ -36,9 +36,11 @@ export function UsersRoute() {
 }
 
 function UserRow({ user }: { user: UserDetail }) {
-  const used = Math.max(0, ...user.keys.map((k) => k.lastUsedAt ?? 0));
+  const used = Math.max(0, ...[...user.keys, ...user.passkeys].map((k) => k.lastUsedAt ?? 0));
   const signIn = [
     user.keys.length > 0 && `${user.keys.length} ${user.keys.length === 1 ? "key" : "keys"}`,
+    user.passkeys.length > 0 &&
+      `${user.passkeys.length} ${user.passkeys.length === 1 ? "passkey" : "passkeys"}`,
     ...user.logins.map((l) => l.name),
   ].filter(Boolean);
   return (
@@ -63,7 +65,15 @@ function UserRow({ user }: { user: UserDetail }) {
           {signIn.length ? signIn.join(", ") : <span className="text-warning">No way to sign in</span>}
         </span>
         <span className="hidden text-right text-[13px] text-fg-muted tabular-nums md:block">
-          {used ? `Used ${ago(used)}` : user.keys.length ? "Never used" : ""}
+          {used ? (
+            <>
+              Used <Ago seconds={used} />
+            </>
+          ) : user.keys.length ? (
+            "Never used"
+          ) : (
+            ""
+          )}
         </span>
         <CaretRightIcon className="size-4 text-fg-faint group-hover:text-fg" />
       </Link>

@@ -8,9 +8,8 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/pires/go-proxyproto"
@@ -33,9 +32,11 @@ type hosted struct {
 	cancel  context.CancelFunc
 
 	// only the tailgate node's run goroutine uses these
-	ln   *tsnet.ServiceListener
-	hs   *http.Server
-	cert certState
+	ln *tsnet.ServiceListener
+	// advertised is when ln started advertising the service
+	advertised time.Time
+	hs         *http.Server
+	cert       certState
 	// fetching is set while a cert is being fetched in the background, which sends the result on certDone
 	fetching bool
 	certDone chan error
@@ -44,7 +45,7 @@ type hosted struct {
 func (h *hosted) close() {
 	// closing the server closes the listener too, which stops advertising the service
 	if h.hs != nil {
-		h.hs.Close()
+		go shutdown(h.hs)
 	} else if h.ln != nil {
 		h.ln.Close()
 	}
@@ -57,8 +58,7 @@ func (h *hosted) close() {
 func (m *Manager) Host(id, hostname string, handler http.Handler) {
 	self := m.Self()
 	// tailscale won't make a service while a device has its name, and a stopped node's device stays
-	_, err := os.Stat(filepath.Join(m.nodesDir(), id))
-	blocked := !errors.Is(err, os.ErrNotExist)
+	_, blocked := m.device(id)
 	self.mu.Lock()
 	cur := self.want[id]
 	self.mu.Unlock()
@@ -66,7 +66,7 @@ func (m *Manager) Host(id, hostname string, handler http.Handler) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &hosted{box: box{key: "service", name: hostname}, id: id, h: handler, blocked: blocked, defined: make(chan struct{}), cancel: cancel, certDone: make(chan error, 1)}
+	h := &hosted{box: box{key: "service", name: hostname, changed: m.changed}, id: id, h: handler, blocked: blocked, defined: make(chan struct{}), cancel: cancel, certDone: make(chan error, 1)}
 	if blocked {
 		h.to(Status{State: WrongName, Err: errors.New("the device of the node this app used before still has its name. Delete it in the tailscale admin console and tailgate carries on")})
 	} else {
@@ -87,7 +87,7 @@ func (m *Manager) Host(id, hostname string, handler http.Handler) {
 	self.poke()
 }
 
-// Unhost stops serving an app's tailscale service and keeps it in tailscale
+// Unhost stops serving an app's tailscale service and keeps it in tailscale, see DeleteServices
 func (m *Manager) Unhost(id string) {
 	self := m.Self()
 	self.mu.Lock()
@@ -107,18 +107,22 @@ func (m *Manager) Hosted() []string {
 	return slices.Sorted(maps.Keys(self.want))
 }
 
-func (m *Manager) hostedNames() map[string]bool {
+// DeleteServices deletes the tailscale services tailgate made that it doesn't serve,
+// except the ones named in keep, by hostname. Services without tag:tailgate aren't tailgate's and are left alone
+func (m *Manager) DeleteServices(ctx context.Context, keep map[string]bool) {
 	self := m.Self()
-	names := map[string]bool{}
-	if self == nil {
-		return names
-	}
 	self.mu.Lock()
-	defer self.mu.Unlock()
 	for _, h := range self.want {
-		names["svc:"+h.name] = true
+		keep[h.name] = true
 	}
-	return names
+	self.mu.Unlock()
+	for _, name := range m.api.defined() {
+		if !keep[strings.TrimPrefix(name, "svc:")] {
+			if err := m.api.undefine(ctx, name); err != nil {
+				slog.Error("deleting an unused tailscale service failed", "service", name, "error", err.Error())
+			}
+		}
+	}
 }
 
 // Status is the status of an app's node or tailscale service
@@ -187,15 +191,21 @@ func (m *Manager) serveOne(ctx context.Context, n *Node, lc *local.Client, st *i
 			h.fail(fmt.Errorf("advertising the tailscale service failed: %w", err))
 			return time.Minute
 		}
-		h.ln = ln
+		h.ln, h.advertised = ln, time.Now()
 	}
-	// approval arrives as a self change, even an auto approved one takes a few seconds
+	// approval arrives as a self change. tailscale doesn't say whether one is on its way, and
+	// tsnet stops advertising every service on start, so even auto approved services wait a
+	// few seconds after every restart. it only needs someone once it's slower than that
 	if !approved {
+		if wait := time.Until(h.advertised.Add(20 * time.Second)); wait > 0 {
+			h.to(Status{State: Starting})
+			return wait
+		}
 		h.to(Status{State: NeedsApproval, Err: fmt.Errorf("approve tailgate as a host of svc:%s in the services page of the tailscale admin console, or auto approve services tagged %s for %s in your policy file", h.name, tag, tag)})
 		return 0
 	}
 	if h.cert.name != fqdn {
-		h.cert = certState{name: fqdn, dir: n.srv.Dir}
+		h.cert = certState{name: fqdn}
 	}
 	// every service waits its turn for a cert, so it's fetched in the background to keep the
 	// tailgate node's own checks and the other services' statuses going meanwhile
@@ -210,7 +220,7 @@ func (m *Manager) serveOne(ctx context.Context, n *Node, lc *local.Client, st *i
 	if !h.fetching && !time.Now().Before(h.cert.next) {
 		h.fetching = true
 		go func(c certState) {
-			h.certDone <- m.cert(ctx, lc, c.dir, c.name)
+			h.certDone <- m.cert(ctx, lc, c.name)
 			n.poke()
 		}(h.cert)
 	}

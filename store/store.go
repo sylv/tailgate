@@ -28,7 +28,9 @@ import (
 var migrations embed.FS
 
 const (
+	// sessions slide forward while they're used, up to their max age from when they were made
 	SessionLifetime = 60 * 24 * time.Hour
+	SessionMaxAge   = 180 * 24 * time.Hour
 	// sliding expiry and last used times are only written when this much older, so busy pages don't write on every request
 	touchEvery = 5 * time.Minute
 )
@@ -51,6 +53,8 @@ type User struct {
 	Admin   bool     `json:"admin"`
 	AllApps bool     `json:"allApps"`
 	Apps    []string `json:"apps"`
+	// SkipPasskeyPrompt is set by "don't ask again" on the prompt to add a passkey
+	SkipPasskeyPrompt bool `json:"-"`
 }
 
 func (u *User) HasAccess(app string) bool {
@@ -72,20 +76,29 @@ type Login struct {
 
 type UserDetail struct {
 	User
-	Keys   []Key   `json:"keys"`
-	Logins []Login `json:"logins"`
+	Keys     []Key     `json:"keys"`
+	Passkeys []Passkey `json:"passkeys"`
+	Logins   []Login   `json:"logins"`
+}
+
+// Cred is what a session was signed in with, a key or a passkey
+type Cred struct {
+	KeyID, PasskeyID string
 }
 
 type Session struct {
-	ID    string
-	KeyID string
-	User  *User
-	// Refreshed is set when the expiry moved, so the cookie should be sent again
+	ID   string
+	Cred Cred
+	User *User
+	// Refreshed is set when the expiry moved, so the cookie should be sent again until Expires
 	Refreshed bool
+	Expires   time.Time
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+	// _txlock=immediate takes the write lock when a transaction starts, so two writers wait on
+	// busy_timeout instead of one failing when it upgrades its read lock
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)&_pragma=synchronous(normal)&_pragma=temp_store(memory)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +220,7 @@ func (s *Store) User(id string) (*User, error) { return user(s.db, id) }
 
 func user(q querier, id string) (*User, error) {
 	u := &User{ID: id}
-	err := q.QueryRow(`SELECT name, note, email, is_admin, is_admin OR has_all_apps FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllApps)
+	err := q.QueryRow(`SELECT name, note, email, is_admin, is_admin OR has_all_apps, skip_passkey_prompt FROM users WHERE id = ?`, id).Scan(&u.Name, &u.Note, &u.Email, &u.Admin, &u.AllApps, &u.SkipPasskeyPrompt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -278,39 +291,48 @@ func (s *Store) LoginUser(loginID int64) (*User, error) {
 // CreateSession returns a new session token for host. host is "" for the
 // tailgate node, and parent is the tailgate node session an app session
 // was made from
-func (s *Store) CreateSession(userID, keyID, host, parent string) (string, error) {
+func (s *Store) CreateSession(userID string, c Cred, host, parent string) (string, error) {
 	now := time.Now()
 	if _, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, now.Unix()); err != nil {
 		return "", err
 	}
 	token := rand.Text()
-	_, err := s.db.Exec(`INSERT INTO sessions (id, user_id, key_id, host, parent, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		hash(token), userID, keyID, host, sql.Null[string]{V: parent, Valid: parent != ""}, now.Add(SessionLifetime).Unix())
+	_, err := s.db.Exec(`INSERT INTO sessions (id, user_id, key_id, passkey_id, host, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		hash(token), userID, null(c.KeyID), null(c.PasskeyID), host, null(parent), now.Unix(), now.Add(SessionLifetime).Unix())
 	return token, err
 }
 
+func null(s string) sql.Null[string] { return sql.Null[string]{V: s, Valid: s != ""} }
+
 // Session looks up a session token for host and pushes its expiry back,
-// along with its parent's. It returns ErrNotFound for unknown and expired ones
+// along with its parent's, up to its max age. It returns ErrNotFound for unknown and expired ones
 func (s *Store) Session(token, host string) (*Session, error) {
 	now := time.Now()
 	sess := &Session{ID: hash(token)}
 	var userID string
-	err := s.db.QueryRow(`SELECT user_id, key_id FROM sessions WHERE id = ? AND host = ? AND expires_at > ?`, sess.ID, host, now.Unix()).Scan(&userID, &sess.KeyID)
+	var keyID, passkeyID sql.Null[string]
+	var created int64
+	err := s.db.QueryRow(`SELECT user_id, key_id, passkey_id, created_at FROM sessions WHERE id = ? AND host = ? AND expires_at > ? AND created_at > ?`,
+		sess.ID, host, now.Unix(), now.Add(-SessionMaxAge).Unix()).Scan(&userID, &keyID, &passkeyID, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	expires := now.Add(SessionLifetime)
-	res, err := s.db.Exec(`UPDATE sessions SET expires_at = ?1 WHERE id IN (?2, (SELECT parent FROM sessions WHERE id = ?2)) AND expires_at < ?3`,
-		expires.Unix(), sess.ID, expires.Add(-touchEvery).Unix())
+	sess.Cred = Cred{KeyID: keyID.V, PasskeyID: passkeyID.V}
+	sess.Expires = now.Add(SessionLifetime)
+	if end := time.Unix(created, 0).Add(SessionMaxAge); end.Before(sess.Expires) {
+		sess.Expires = end
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET expires_at = min(?1, created_at + ?4) WHERE id IN (?2, (SELECT parent FROM sessions WHERE id = ?2)) AND expires_at < ?3 AND expires_at < created_at + ?4`,
+		now.Add(SessionLifetime).Unix(), sess.ID, now.Add(SessionLifetime-touchEvery).Unix(), int64(SessionMaxAge.Seconds()))
 	if err != nil {
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
 		sess.Refreshed = true
-		if err := s.touchKey(sess.KeyID); err != nil {
+		if err := s.touchKey(sess.Cred.KeyID); err != nil {
 			return nil, err
 		}
 	}
@@ -344,40 +366,50 @@ func (s *Store) Users() ([]UserDetail, error) {
 	}
 	users := []UserDetail{}
 	for _, id := range ids {
-		u, err := s.User(id)
+		d, err := s.UserDetail(id)
 		if err != nil {
 			return nil, err
 		}
-		d := UserDetail{User: *u, Keys: []Key{}, Logins: []Login{}}
-		rows, err := s.db.Query(`SELECT id, label, created_at, last_used_at FROM keys WHERE user_id = ? ORDER BY created_at`, id)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var k Key
-			if err := rows.Scan(&k.ID, &k.Label, &k.CreatedAt, &k.LastUsedAt); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			d.Keys = append(d.Keys, k)
-		}
-		rows.Close()
-		rows, err = s.db.Query(`SELECT login_id, login_name FROM user_logins WHERE user_id = ? ORDER BY login_name`, id)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var l Login
-			if err := rows.Scan(&l.ID, &l.Name); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			d.Logins = append(d.Logins, l)
-		}
-		rows.Close()
-		users = append(users, d)
+		users = append(users, *d)
 	}
 	return users, nil
+}
+
+// UserDetail is a user with their keys, passkeys and tailnet logins
+func (s *Store) UserDetail(id string) (*UserDetail, error) {
+	u, err := s.User(id)
+	if err != nil {
+		return nil, err
+	}
+	d := &UserDetail{User: *u, Keys: []Key{}, Logins: []Login{}}
+	if d.Passkeys, err = s.Passkeys(id); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT id, label, created_at, last_used_at FROM keys WHERE user_id = ? AND NOT is_setup ORDER BY created_at`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k Key
+		if err := rows.Scan(&k.ID, &k.Label, &k.CreatedAt, &k.LastUsedAt); err != nil {
+			return nil, err
+		}
+		d.Keys = append(d.Keys, k)
+	}
+	rows, err = s.db.Query(`SELECT login_id, login_name FROM user_logins WHERE user_id = ? ORDER BY login_name`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l Login
+		if err := rows.Scan(&l.ID, &l.Name); err != nil {
+			return nil, err
+		}
+		d.Logins = append(d.Logins, l)
+	}
+	return d, rows.Err()
 }
 
 // SaveUser creates the user when u.ID is "" and updates it otherwise. It
@@ -447,7 +479,7 @@ func (s *Store) RevokeKey(id string) error {
 	return found(res, err)
 }
 
-// ResetKeys revokes all of a user's keys and returns one new key
+// ResetKeys revokes all of a user's keys and passkeys and returns one new key
 func (s *Store) ResetKeys(userID string) (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -458,6 +490,9 @@ func (s *Store) ResetKeys(userID string) (string, error) {
 		return "", err
 	}
 	if _, err := tx.Exec(`DELETE FROM keys WHERE user_id = ?`, userID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`DELETE FROM passkeys WHERE user_id = ?`, userID); err != nil {
 		return "", err
 	}
 	key, err := addKey(tx, userID, "", false)
@@ -651,4 +686,108 @@ func (s *Store) SigningKey() (*rsa.PrivateKey, error) {
 		return nil, errors.New("the signing key isn't an RSA key")
 	}
 	return rk, nil
+}
+
+type Passkey struct {
+	ID string `json:"id"`
+	// AAGUID names the authenticator model, all zeros when it doesn't say
+	AAGUID     string `json:"aaguid"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastUsedAt *int64 `json:"lastUsedAt"`
+	UserAgent  string `json:"userAgent"`
+	// Credential is the webauthn.Credential json
+	Credential []byte `json:"-"`
+}
+
+func (s *Store) Passkeys(userID string) ([]Passkey, error) {
+	rows, err := s.db.Query(`SELECT id, aaguid, created_at, last_used_at, user_agent, credential FROM passkeys WHERE user_id = ? ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := []Passkey{}
+	for rows.Next() {
+		var p Passkey
+		if err := rows.Scan(&p.ID, &p.AAGUID, &p.CreatedAt, &p.LastUsedAt, &p.UserAgent, &p.Credential); err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+func (s *Store) AddPasskey(userID string, credentialID, credential []byte, aaguid, userAgent string) error {
+	_, err := s.db.Exec(`INSERT INTO passkeys (id, user_id, credential_id, credential, aaguid, created_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rand.Text(), userID, credentialID, string(credential), aaguid, time.Now().Unix(), userAgent)
+	if isConstraint(err, sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY) {
+		return ErrNotFound
+	}
+	return uniqueErr(err)
+}
+
+// PasskeyUser returns the id and user of the passkey with this credential id, or ErrNotFound
+func (s *Store) PasskeyUser(credentialID []byte) (string, string, error) {
+	var id, userID string
+	err := s.db.QueryRow(`SELECT id, user_id FROM passkeys WHERE credential_id = ?`, credentialID).Scan(&id, &userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return id, userID, err
+}
+
+// UsePasskey saves a passkey's credential after a sign in, which moves its sign count on
+func (s *Store) UsePasskey(id string, credential []byte, userAgent string) error {
+	res, err := s.db.Exec(`UPDATE passkeys SET credential = ?, last_used_at = ?, user_agent = ? WHERE id = ?`, string(credential), time.Now().Unix(), userAgent, id)
+	return found(res, err)
+}
+
+// DeletePasskey removes a passkey, which ends every session made with it
+func (s *Store) DeletePasskey(id string) error {
+	res, err := s.db.Exec(`DELETE FROM passkeys WHERE id = ?`, id)
+	return found(res, err)
+}
+
+func (s *Store) SkipPasskeyPrompt(userID string) error {
+	res, err := s.db.Exec(`UPDATE users SET skip_passkey_prompt = 1 WHERE id = ?`, userID)
+	return found(res, err)
+}
+
+// Nodes maps the app of each node tailgate started to its device id, "" until it joined
+func (s *Store) Nodes() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT app, device_id FROM nodes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	nodes := map[string]string{}
+	for rows.Next() {
+		var app, id string
+		if err := rows.Scan(&app, &id); err != nil {
+			return nil, err
+		}
+		nodes[app] = id
+	}
+	return nodes, rows.Err()
+}
+
+func (s *Store) SaveNode(app, deviceID string) error {
+	_, err := s.db.Exec(`INSERT INTO nodes (app, device_id) VALUES (?, ?) ON CONFLICT (app) DO UPDATE SET device_id = excluded.device_id`, app, deviceID)
+	return err
+}
+
+func (s *Store) DeleteNode(app string) error {
+	_, err := s.db.Exec(`DELETE FROM nodes WHERE app = ?`, app)
+	return err
+}
+
+// CertValid is whether tailgate fetched a cert for domain that hasn't expired
+func (s *Store) CertValid(domain string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM certs WHERE domain = ? AND expires_at > ?)`, domain, time.Now().Unix()).Scan(&ok)
+	return ok, err
+}
+
+func (s *Store) SaveCert(domain string, expires time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO certs (domain, expires_at) VALUES (?, ?) ON CONFLICT (domain) DO UPDATE SET expires_at = excluded.expires_at`, domain, expires.Unix())
+	return err
 }

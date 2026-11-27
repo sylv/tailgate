@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -24,6 +23,8 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/tsnet"
+
+	"github.com/sylv/tailgate/store"
 )
 
 type State string
@@ -57,12 +58,20 @@ type Status struct {
 	RetryAt     time.Time
 	// Service is set when the tailgate node serves it as a tailscale service
 	Service bool
+	// Funnel is whether the node's funnel listener is on
+	Funnel bool
 }
 
-// box holds a node's or a tailscale service's status and logs its changes
+func (s Status) same(o Status) bool {
+	return s.State == o.State && s.DNSName == o.DNSName && s.SignCommand == o.SignCommand && fmt.Sprint(s.Err) == fmt.Sprint(o.Err) &&
+		s.RetryAt.Equal(o.RetryAt) && s.Service == o.Service && s.Funnel == o.Funnel
+}
+
+// box holds a node's or a tailscale service's status, logs its changes and tells the manager
 type box struct {
 	// key is "node" or "service", for the logs
 	key, name string
+	changed   func()
 
 	smu    sync.Mutex
 	status Status
@@ -81,6 +90,9 @@ func (b *box) set(f func(*Status)) {
 	b.status.Service = b.key == "service"
 	after := b.status
 	b.smu.Unlock()
+	if !before.same(after) && b.changed != nil {
+		b.changed()
+	}
 	if before.State != after.State || before.SignCommand != after.SignCommand {
 		attrs := []any{b.key, b.name, "state", after.State}
 		if after.DNSName != "" {
@@ -111,20 +123,19 @@ func (b *box) set(f func(*Status)) {
 	}
 }
 
-// to moves to st, keeping the DNS name
+// to moves to st, keeping the DNS name and funnel
 func (b *box) to(st Status) {
 	b.set(func(s *Status) {
-		st.DNSName = s.DNSName
+		st.DNSName, st.Funnel = s.DNSName, s.Funnel
 		*s = st
 	})
 }
 
 func (b *box) fail(err error) { b.to(Status{State: Failed, Err: err}) }
 
-// certState is how getting the cert for name is going. dir is the node's state dir, which caches it
+// certState is how getting the cert for name is going
 type certState struct {
 	name string
-	dir  string
 	ok   bool
 	err  error
 	wait time.Duration
@@ -133,6 +144,8 @@ type certState struct {
 
 type Node struct {
 	box
+	// id is the app's, "" for the tailgate node
+	id            string
 	self          bool
 	srv           *tsnet.Server
 	cancel        context.CancelFunc
@@ -168,8 +181,12 @@ func (n *Node) Done() <-chan struct{} { return n.done }
 // SetFunnel turns the node's funnel listener on or off
 func (n *Node) SetFunnel(on bool) {
 	n.mu.Lock()
+	was := n.funnel
 	n.funnel = on
 	n.mu.Unlock()
+	if was == on {
+		return
+	}
 	select {
 	case n.funnelChanged <- struct{}{}:
 	default:
@@ -185,17 +202,32 @@ func (n *Node) wantsFunnel() bool {
 type Manager struct {
 	dataDir string
 	api     *API
-	// one cert request at a time so starting many nodes doesn't hit let's encrypt rate limits, see cert
+	db      *store.Store
+	// changed is called whenever a node's or tailscale service's status changes, and forgot when unused nodes are forgotten
+	changed, forgot func()
+	// new certs come from let's encrypt two at a time, see cert
 	certSem chan struct{}
 
 	mu       sync.Mutex
 	self     *Node
 	nodes    map[string]*Node
 	untagged bool
+	// devices maps each app that has a node, running or not, to its device id, "" until it joined
+	devices map[string]string
+	// peers is the device ids the tailgate node can see, nil until it has looked
+	peers map[string]bool
+	// unused is the apps whose nodes no container uses, see Unused
+	unused []string
+	// problem is set while the tailgate node can't see a running funnel node, so deleted devices can't be noticed
+	problem string
 }
 
-func NewManager(dataDir string, api *API) *Manager {
-	return &Manager{dataDir: dataDir, api: api, certSem: make(chan struct{}, 1), nodes: map[string]*Node{}}
+func NewManager(dataDir string, api *API, db *store.Store, changed, forgot func()) (*Manager, error) {
+	devices, err := db.Nodes()
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{dataDir: dataDir, api: api, db: db, changed: changed, forgot: forgot, certSem: make(chan struct{}, 2), nodes: map[string]*Node{}, devices: devices}, nil
 }
 
 func (m *Manager) nodesDir() string { return filepath.Join(m.dataDir, "nodes") }
@@ -204,7 +236,7 @@ func (m *Manager) nodesDir() string { return filepath.Join(m.dataDir, "nodes") }
 func (m *Manager) StartSelf(hostname string, tailnet, funnel http.Handler) *Node {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.self = m.start(hostname, filepath.Join(m.dataDir, "tailgate"), true, tailnet, funnel)
+	m.self = m.start("", hostname, filepath.Join(m.dataDir, "tailgate"), tailnet, funnel)
 	return m.self
 }
 
@@ -225,7 +257,7 @@ func (m *Manager) Start(id, hostname string, h http.Handler, funnel bool) {
 		return
 	}
 	if m.nodes[id] == nil {
-		m.nodes[id] = m.start(hostname, filepath.Join(m.nodesDir(), id), false, h, h)
+		m.nodes[id] = m.start(id, hostname, filepath.Join(m.nodesDir(), id), h, h)
 	}
 	m.nodes[id].SetFunnel(funnel)
 }
@@ -282,11 +314,13 @@ func (n *Node) stop() {
 	<-n.done
 }
 
-func (m *Manager) start(name, dir string, self bool, tailnet, funnel http.Handler) *Node {
+// start runs a node, m.mu is held
+func (m *Manager) start(id, name, dir string, tailnet, funnel http.Handler) *Node {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{
-		box:           box{key: "node", name: name, status: Status{State: Starting}},
-		self:          self,
+		box:           box{key: "node", name: name, status: Status{State: Starting}, changed: m.changed},
+		id:            id,
+		self:          id == "",
 		cancel:        cancel,
 		done:          make(chan struct{}),
 		ready:         make(chan struct{}),
@@ -309,9 +343,8 @@ func (m *Manager) start(name, dir string, self bool, tailnet, funnel http.Handle
 		},
 	}
 	// tailscale sends the auth key with every login, so a removed node could come back on
-	// its own. only new nodes get one, a logged out app node waits for Login
-	_, err := os.Stat(filepath.Join(dir, "tailscaled.state"))
-	n.fresh = errors.Is(err, os.ErrNotExist)
+	// its own. only nodes that never joined get one, a logged out app node waits for Login
+	n.fresh = m.devices[id] == ""
 	slog.Info("node state", "node", name, "state", Starting)
 	go m.run(ctx, n, tailnet, funnel)
 	return n
@@ -323,6 +356,10 @@ func (m *Manager) run(ctx context.Context, n *Node, tailnet, funnel http.Handler
 	defer close(n.done)
 	if err := os.MkdirAll(n.srv.Dir, 0o700); err != nil {
 		n.fail(err)
+		return
+	}
+	if _, ok := m.device(n.id); !ok && m.saveDevice(n.id, "") != nil {
+		n.fail(errors.New("saving the node failed"))
 		return
 	}
 	// a tailscale service tailgate made with the node's name holds the name
@@ -345,7 +382,7 @@ func (m *Manager) run(ctx context.Context, n *Node, tailnet, funnel http.Handler
 	// the watch ends with run, including when the node fails
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go n.watch(ctx, lc)
+	go m.watch(ctx, n, lc)
 	for {
 		wait, err := m.check(ctx, n, lc, tailnet, funnel)
 		if err != nil {
@@ -376,10 +413,21 @@ func (n *Node) poke() {
 }
 
 // watch pokes the node whenever tailscale's state or the node's own netmap entry
-// changes, which covers its login, tags, signature, name and https and funnel access
-func (n *Node) watch(ctx context.Context, lc *local.Client) {
+// changes, which covers its login, tags, signature, name and https and funnel access.
+// The tailgate node also watches its peers, to notice deleted devices
+func (m *Manager) watch(ctx context.Context, n *Node, lc *local.Client) {
+	mask := ipn.NotifyInitialState
+	peers := make(chan struct{}, 1)
+	if n.self {
+		mask |= ipn.NotifyPeerChanges
+		go m.watchPeers(ctx, lc, peers)
+	}
 	for ctx.Err() == nil {
-		if w, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState); err == nil {
+		if w, err := lc.WatchIPNBus(ctx, mask); err == nil {
+			select {
+			case peers <- struct{}{}:
+			default:
+			}
 			for {
 				note, err := w.Next()
 				if err != nil {
@@ -392,6 +440,12 @@ func (n *Node) watch(ctx context.Context, lc *local.Client) {
 				}
 				if note.State != nil || note.SelfChange != nil || note.ErrMessage != nil {
 					n.poke()
+				}
+				if len(note.PeersChanged) > 0 || len(note.PeersRemoved) > 0 {
+					select {
+					case peers <- struct{}{}:
+					default:
+					}
 				}
 			}
 			w.Close()
@@ -452,6 +506,13 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		logoutErr := lc.Logout(logoutCtx)
 		return 0, errors.Join(fmt.Errorf("this node isn't tagged %s, so it was logged out and tailgate won't create any more nodes", tag), logoutErr)
 	}
+	if id := string(st.Self.ID); id != "" {
+		if old, _ := m.device(n.id); old != id {
+			if err := m.saveDevice(n.id, id); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if !n.joined {
 		n.joined = true
 		// a crash leaves funnel allowed and services advertised in the node's state, and
@@ -501,7 +562,7 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 	if n.cert.name != dnsName {
 		// the old name's listeners go now, the new name needs its own cert
 		n.stopServing()
-		n.cert = certState{name: dnsName, dir: n.srv.Dir}
+		n.cert = certState{name: dnsName}
 	}
 	if !m.renew(ctx, lc, &n.cert, &n.box) {
 		return time.Until(n.cert.next), nil
@@ -522,11 +583,13 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 		if funnelErr = err; err == nil {
 			n.fs = server(dnsName, funnel, funnelConn)
 			go n.fs.Serve(ln)
+			n.set(func(s *Status) { s.Funnel = true })
 			slog.Info("funnel on", "node", n.name)
 		}
 	case !want && n.fs != nil:
-		n.fs.Close()
+		go shutdown(n.fs)
 		n.fs = nil
+		n.set(func(s *Status) { s.Funnel = false })
 		slog.Info("funnel off", "node", n.name)
 	}
 	switch {
@@ -545,22 +608,48 @@ func (n *Node) tlsConfig(lc *local.Client) *tls.Config {
 	return &tls.Config{NextProtos: []string{"h2", "http/1.1"}, GetCertificate: lc.GetCertificate}
 }
 
+// stopServing closes the node's servers. They finish their requests in the
+// background, except when tailgate shuts down, which waits for them
 func (n *Node) stopServing() {
+	var servers []*http.Server
 	if n.hs != nil {
-		n.hs.Close()
+		servers = append(servers, n.hs)
 		n.hs = nil
 	}
 	if n.fs != nil {
-		n.fs.Close()
+		servers = append(servers, n.fs)
 		n.fs = nil
+		n.set(func(s *Status) { s.Funnel = false })
 		slog.Info("funnel off", "node", n.name)
 	}
 	for id, h := range n.serving {
-		h.close()
+		if h.hs != nil {
+			servers = append(servers, h.hs)
+		} else if h.ln != nil {
+			h.ln.Close()
+		}
+		h.hs, h.ln = nil, nil
 		if !n.shuttingDown {
 			h.to(Status{State: Starting})
 		}
 		delete(n.serving, id)
+	}
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		wg.Go(func() { shutdown(s) })
+	}
+	if n.shuttingDown {
+		wg.Wait()
+	}
+}
+
+// shutdown lets open requests finish for a few seconds, then cuts off the rest,
+// like websockets and event streams that never finish
+func shutdown(s *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if s.Shutdown(ctx) != nil {
+		s.Close()
 	}
 }
 
@@ -570,7 +659,7 @@ func (m *Manager) renew(ctx context.Context, lc *local.Client, c *certState, b *
 		if !c.ok {
 			b.to(Status{State: CertPending, Err: c.err})
 		}
-		err := m.cert(ctx, lc, c.dir, c.name)
+		err := m.cert(ctx, lc, c.name)
 		if ctx.Err() != nil {
 			return false
 		}
@@ -594,44 +683,37 @@ func (c *certState) record(err error, b *box) {
 	c.next = time.Now().Add(cmp.Or(c.wait, time.Hour))
 }
 
-// cert gets a cert for name, one node at a time. After a failure the next node
-// waits a bit, so nodes retrying together don't all reach let's encrypt at once
-func (m *Manager) cert(ctx context.Context, lc *local.Client, dir, name string) error {
-	// tailscale answers from its cache while the cached cert is valid, renewing it in the
-	// background, so only a cert that has to come from let's encrypt waits its turn
-	if cached(dir, name) {
-		_, _, err := lc.CertPair(ctx, name)
+// cert gets a cert for name. tailscale answers from its cache while it has a valid cert,
+// renewing it in the background, so only a cert tailgate hasn't fetched before waits its
+// turn. On a first start every app needs one, and let's encrypt fails orders that all
+// arrive at once
+func (m *Manager) cert(ctx context.Context, lc *local.Client, name string) error {
+	if valid, err := m.db.CertValid(name); err != nil {
 		return err
-	}
-	select {
-	case m.certSem <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
+	} else if !valid {
+		select {
+		case m.certSem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-m.certSem }()
 	}
 	// tailscale waits on let's encrypt with no deadline, so one stuck order would hold up every other node
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	_, _, err := lc.CertPair(ctx, name)
+	certPEM, _, err := lc.CertPair(ctx, name)
 	if err != nil {
-		time.AfterFunc(10*time.Second, func() { <-m.certSem })
-	} else {
-		<-m.certSem
+		return err
 	}
-	return err
-}
-
-// cached is whether tailscale has a valid cert for name in the node's state dir
-func cached(dir, name string) bool {
-	b, err := os.ReadFile(filepath.Join(dir, "certs", name+".crt"))
-	if err != nil {
-		return false
-	}
-	block, _ := pem.Decode(b)
+	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return false
+		return errors.New("tailscale sent a cert that isn't PEM")
 	}
 	c, err := x509.ParseCertificate(block.Bytes)
-	return err == nil && time.Now().Before(c.NotAfter)
+	if err != nil {
+		return err
+	}
+	return m.db.SaveCert(name, c.NotAfter)
 }
 
 // login logs the node in with a new auth key. Its state dir keeps its machine key,
@@ -663,10 +745,21 @@ func (m *Manager) Login(ctx context.Context, id string) error {
 	return m.login(ctx, n, lc, key)
 }
 
-// tailnetConn looks up which device a tailnet connection came from, once
+// tailnetConn looks up which device a tailnet connection came from, once it's found
 func tailnetConn(lc *local.Client) func(net.Conn) *conn {
 	return func(c net.Conn) *conn {
-		return &conn{peer: sync.OnceValues(func() (*Peer, error) { return whois(lc, c.RemoteAddr().String()) })}
+		var mu sync.Mutex
+		var found *Peer
+		return &conn{peer: func() (*Peer, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if found != nil {
+				return found, nil
+			}
+			p, err := whois(lc, c.RemoteAddr().String())
+			found = p
+			return p, err
+		}}
 	}
 }
 
@@ -743,8 +836,9 @@ type Peer struct {
 func (p *Peer) Linkable() bool { return len(p.Tags) == 0 && !p.Routes }
 
 // PeerOf returns the device a request's connection came from, or nil for
-// funnel. WhoIs runs once per connection, since a connection can't change
-// which device it comes from
+// funnel and for a device tailscale doesn't know, which is anonymous. A found
+// device is kept for the connection, since a connection can't change which
+// device it comes from
 func PeerOf(ctx context.Context) (*Peer, error) {
 	c, ok := ctx.Value(connKey{}).(*conn)
 	if !ok {
@@ -760,6 +854,9 @@ func whois(lc *local.Client, addr string) (*Peer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	w, err := lc.WhoIs(ctx, addr)
+	if errors.Is(err, local.ErrPeerNotFound) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -832,111 +929,106 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// Unused lists the state dirs in nodes/ of the ids not in inUse, which are the
-// apps that could use a node, and then the tailscale services tailgate
-// made that it doesn't serve, like svc:photos
-func (m *Manager) Unused(inUse map[string]bool) ([]string, error) {
-	var names []string
-	entries, err := os.ReadDir(m.nodesDir())
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	for _, e := range entries {
-		if e.IsDir() && !inUse[e.Name()] {
-			names = append(names, e.Name())
-		}
-	}
-	hosted := m.hostedNames()
-	for _, name := range m.api.defined() {
-		if !hosted[name] {
-			names = append(names, name)
-		}
-	}
-	return names, nil
+func (m *Manager) device(id string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.devices[id]
+	return d, ok
 }
 
-// Prune forgets the unused nodes and tailscale services that were deleted in the
-// tailscale admin console, dropping a node's state dir. It's true when it forgot any
-func (m *Manager) Prune(ctx context.Context, inUse map[string]bool) (bool, error) {
-	unused, err := m.Unused(inUse)
-	if err != nil || len(unused) == 0 {
-		return false, err
+func (m *Manager) saveDevice(id, device string) error {
+	if err := m.db.SaveNode(id, device); err != nil {
+		return err
 	}
-	devices, err := m.api.devices(ctx)
-	if err != nil {
-		return false, err
-	}
-	// the tailgate node is always there, so an empty list is a mistake that would drop every unused node
-	if len(devices) == 0 {
-		return false, errors.New("the tailscale api listed no devices")
-	}
-	services, err := m.api.services(ctx)
-	if err != nil {
-		return false, err
-	}
-	pruned := false
-	var errs []error
-	for _, name := range unused {
-		if strings.HasPrefix(name, "svc:") {
-			if !services[name] {
-				m.api.forget(name)
-				slog.Info("tailscale service was deleted", "service", name)
-				pruned = true
-			}
-			continue
+	m.mu.Lock()
+	m.devices[id] = device
+	m.mu.Unlock()
+	return nil
+}
+
+// Unused lists the apps whose nodes no container uses, inUse being the apps that
+// could use one. It forgets the ones whose devices were deleted first
+func (m *Manager) Unused(inUse map[string]bool) []string {
+	m.mu.Lock()
+	m.unused = m.unused[:0]
+	for id := range m.devices {
+		if id != "" && !inUse[id] && m.nodes[id] == nil {
+			m.unused = append(m.unused, id)
 		}
-		dir := filepath.Join(m.nodesDir(), name)
-		id, err := deviceID(dir)
+	}
+	slices.Sort(m.unused)
+	m.mu.Unlock()
+	m.prune()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.unused)
+}
+
+// Problem is the self check, "" when the tailgate node can see the funnel nodes
+func (m *Manager) Problem() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.problem
+}
+
+// watchPeers reads the devices the tailgate node can see whenever they change
+func (m *Manager) watchPeers(ctx context.Context, lc *local.Client, changed <-chan struct{}) {
+	for {
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return
+		}
+		st, err := lc.Status(ctx)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		if devices[id] {
-			continue
+		peers := map[string]bool{}
+		for _, p := range st.Peer {
+			peers[string(p.ID)] = true
 		}
 		m.mu.Lock()
-		// a node that started meanwhile uses the dir
-		if m.nodes[name] == nil {
-			err = os.RemoveAll(dir)
-		}
+		same := maps.Equal(peers, m.peers)
+		m.peers = peers
 		m.mu.Unlock()
-		if err != nil {
-			errs = append(errs, err)
-			continue
+		if !same && m.prune() {
+			m.forgot()
 		}
-		slog.Info("node's device was deleted, so its state was too", "node", name)
-		pruned = true
+		// a busy tailnet changes peers constantly, so this looks at most every few seconds
+		sleep(ctx, 5*time.Second)
 	}
-	return pruned, errors.Join(errs...)
 }
 
-// deviceID reads the stable id of the device a node's state dir logs in as,
-// "" when it never joined
-func deviceID(dir string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+// prune forgets the unused nodes whose devices were deleted in tailscale, which is when the
+// tailgate node stops seeing them, dropping their state dirs. That relies on a grant from
+// tag:tailgate to tag:tailgate, so nothing is pruned while a running node is missing. It's
+// true when it forgot any
+func (m *Manager) prune() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.peers == nil {
+		return false
 	}
-	if err != nil {
-		return "", err
-	}
-	// the state file maps keys to json, and _profiles lists the logins with their device ids
-	var state map[ipn.StateKey][]byte
-	if err := json.Unmarshal(b, &state); err != nil {
-		return "", err
-	}
-	if state[ipn.KnownProfilesStateKey] == nil {
-		return "", nil
-	}
-	var profiles map[ipn.ProfileID]ipn.LoginProfile
-	if err := json.Unmarshal(state[ipn.KnownProfilesStateKey], &profiles); err != nil {
-		return "", err
-	}
-	// _current-profile names the profile's own state key
-	for _, p := range profiles {
-		if p.Key == ipn.StateKey(state[ipn.CurrentProfileStateKey]) {
-			return string(p.NodeID), nil
+	m.problem = ""
+	for id, n := range m.nodes {
+		if d := m.devices[id]; d != "" && !m.peers[d] && n.Status().State == Online {
+			m.problem = fmt.Sprintf("The tailgate node can't see %s, so it can't notice deleted devices. Add a grant from %s to %s on port 443 to your tailnet policy", n.name, tag, tag)
+			return false
 		}
 	}
-	return "", errors.New("the node's state has no current profile")
+	pruned := false
+	m.unused = slices.DeleteFunc(m.unused, func(id string) bool {
+		if m.peers[m.devices[id]] || m.nodes[id] != nil {
+			return false
+		}
+		if err := errors.Join(os.RemoveAll(filepath.Join(m.nodesDir(), id)), m.db.DeleteNode(id)); err != nil {
+			slog.Error("forgetting a deleted node failed", "node", id, "error", err.Error())
+			return false
+		}
+		delete(m.devices, id)
+		slog.Info("node's device was deleted, so its state was too", "node", id)
+		pruned = true
+		return true
+	})
+	return pruned
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,14 +12,28 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/klauspost/compress/gzhttp"
+
 	"github.com/sylv/tailgate/app"
 	"github.com/sylv/tailgate/node"
 	"github.com/sylv/tailgate/rules"
+	"github.com/sylv/tailgate/store"
 )
 
 const callbackPath = "/.tailgate/callback"
 
 type appKey struct{}
+
+// compressed compresses responses for clients that take it. It goes outside requests, so
+// websockets can reach the connection. Event streams stay plain, gzhttp holds a response
+// back until something is written, and a stream's events are small anyway
+var compressed = func() func(http.Handler) http.HandlerFunc {
+	wrap, err := gzhttp.NewWrapper(gzhttp.ExceptContentTypes([]string{"text/event-stream"}))
+	if err != nil {
+		panic(err)
+	}
+	return wrap
+}()
 
 func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 	transport := &http.Transport{
@@ -48,7 +63,6 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 				res.Header.Set("X-Robots-Tag", noindex)
 			}
 			requestOf(res.Request.Context()).rules.ApplyResponse(res.Header)
-			compress(res)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -61,7 +75,7 @@ func newProxy() (*http.Transport, *httputil.ReverseProxy) {
 // appHandler serves an app's host. Pre-auth rules run first, then
 // the callback and the login and access checks, then post-auth rules
 func (g *gate) appHandler(name string) http.Handler {
-	return requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return compressed(requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s, ok := g.route(name)
 		if !ok {
 			plain(w, r, http.StatusBadGateway, "app unavailable")
@@ -105,7 +119,7 @@ func (g *gate) appHandler(name string) http.Handler {
 			return
 		}
 		g.proxy(w, r, s)
-	}))
+	})))
 }
 
 // authorized is the auth section. It answers the callback and stops requests
@@ -120,7 +134,11 @@ func (g *gate) authorized(w http.ResponseWriter, r *http.Request, name string, i
 			plain(w, r, http.StatusUnauthorized, "sign in required")
 			return false
 		}
-		redirect(w, "https://"+g.hosts("")+"/login?"+url.Values{"to": {name + ":" + r.URL.RequestURI()}}.Encode())
+		// the callback only takes a code made for this browser, so nobody can send someone a
+		// link that signs them in as somebody else
+		state := rand.Text()
+		http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: state, Path: "/", MaxAge: 600, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		redirect(w, "https://"+g.selfHost()+"/login?"+url.Values{"to": {name + ":" + r.URL.RequestURI()}, "state": {state}}.Encode())
 		return false
 	}
 	if !id.user.HasAccess(name) {
@@ -207,12 +225,24 @@ func (g *gate) callback(w http.ResponseWriter, r *http.Request, name string) {
 		plain(w, r, http.StatusNotFound, "404 page not found")
 		return
 	}
-	token, err := g.db.CreateSession(c.userID, c.keyID, name, c.parent)
+	state, err := r.Cookie(stateCookie)
+	switch {
+	case err != nil:
+		plain(w, r, http.StatusBadRequest, "sign in failed, your browser didn't keep tailgate's cookie")
+		return
+	case state.Value != c.state:
+		// another tab started signing in since, or the link isn't this browser's. going
+		// back to the page signs in again with this browser's own state
+		redirect(w, c.path)
+		return
+	}
+	token, err := g.db.CreateSession(c.userID, c.cred, name, c.parent)
 	if err != nil {
 		slog.Error("creating a session failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
 		plain(w, r, http.StatusInternalServerError, "sign in failed")
 		return
 	}
-	setCookie(w, token)
+	clearCookie(w, stateCookie)
+	setCookie(w, token, time.Now().Add(store.SessionLifetime))
 	redirect(w, c.path)
 }

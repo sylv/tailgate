@@ -21,6 +21,8 @@ export const Select = <V extends string>({
   placeholder,
   size = "md",
   className,
+  onOpenChange,
+  empty,
 }: {
   value: V | undefined;
   onValueChange: (value: V) => void;
@@ -29,10 +31,13 @@ export const Select = <V extends string>({
   placeholder?: string;
   size?: "sm" | "md";
   className?: string;
+  onOpenChange?: (open: boolean) => void;
+  // shown in the panel when there are no options
+  empty?: ReactNode;
 }) => {
   const current = options.find((o) => o.value === value);
   return (
-    <Menu>
+    <Menu onOpenChange={onOpenChange}>
       <MenuTrigger
         aria-label={label}
         className={cn(
@@ -51,6 +56,7 @@ export const Select = <V extends string>({
         <CaretUpDownIcon className="text-fg-faint" />
       </MenuTrigger>
       <MenuContent className="min-w-(--radix-dropdown-menu-trigger-width)">
+        {options.length === 0 && empty && <p className="px-2 py-1.5 text-[13px] text-fg-muted">{empty}</p>}
         <MenuRadioGroup value={value} onValueChange={(v) => onValueChange(v as V)}>
           {options.map((o) => (
             <MenuRadioItem key={o.value} value={o.value} description={o.description}>

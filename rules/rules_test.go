@@ -55,6 +55,7 @@ func TestRun(t *testing.T) {
 		rule(Post, `app.id == "lyra"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `user.name`}, Effect{Type: SetResponseHeader, Name: "Set-Cookie", Value: `"a=1"`}),
 		rule(Post, `user.via == "key"`, Effect{Type: SetRequestHeader, Name: "X-User", Value: `"key:" + user.name`}, Effect{Type: RemoveRequestHeader, Name: "Referer"}),
 		rule(Post, `header("X-Old") == "1"`, Effect{Type: Redirect, Value: `"https://" + host + "/new"`, Status: 308}),
+		rule(Post, `app.id == "other"`, Effect{Type: SetRequestHeader, Name: "x-admin", Value: `user.name`, Strip: true}),
 	})
 	if errs != nil {
 		t.Fatal(errs)
@@ -96,9 +97,10 @@ func TestRun(t *testing.T) {
 	if err := set.Run(Post, tailnet, User{SignedIn: true, Name: "ezra", Via: "key"}, &res); err != nil || res.End != nil {
 		t.Fatal(res.End, err)
 	}
-	h = http.Header{"X-User": {"faked"}, "Referer": {"https://elsewhere"}}
+	// a stripped header goes even though its rule didn't match
+	h = http.Header{"X-User": {"faked"}, "Referer": {"https://elsewhere"}, "X-Admin": {"faked"}}
 	res.ApplyRequest(h)
-	if h.Get("X-User") != "key:ezra" || h.Get("Referer") != "" {
+	if h.Get("X-User") != "key:ezra" || h.Get("Referer") != "" || h.Get("X-Admin") != "" {
 		t.Errorf("got request headers %v", h)
 	}
 	h = http.Header{"Set-Cookie": {"app=1"}}

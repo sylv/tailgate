@@ -21,7 +21,7 @@ func TestOIDC(t *testing.T) {
 	clientID, secret, _ := tg.db.SaveOIDCClient(store.OIDCClient{Name: "photos", App: "photos", RedirectURIs: []string{"https://photos.ts.net/auth/callback", "app.photos:///cb"}})
 	userID, _ := tg.db.UserIDByName("ezra")
 	_, keyID, _ := tg.db.KeyUser(tg.key)
-	session, _ := tg.db.CreateSession(userID, keyID, "", "")
+	session, _ := tg.db.CreateSession(userID, store.Cred{KeyID: keyID}, "", "")
 	signedIn := http.Header{"Cookie": {cookieName + "=" + session}}
 	verifier := "a-long-enough-pkce-verifier-for-the-test"
 	authorize := func(redirect, client string, h http.Header) *httptest.ResponseRecorder {
@@ -129,7 +129,7 @@ func TestOIDCRedirectURIs(t *testing.T) {
 	id, _ := tg.db.UserIDByName("ezra")
 	tg.db.SetAdmin(id, true)
 	_, keyID, _ := tg.db.KeyUser(tg.key)
-	session, _ := tg.db.CreateSession(id, keyID, "", "")
+	session, _ := tg.db.CreateSession(id, store.Cred{KeyID: keyID}, "", "")
 	for uri, ok := range map[string]bool{
 		"https://photos.ts.net/cb":     true,
 		"app.immich:///oauth-callback": true,

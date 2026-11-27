@@ -6,7 +6,8 @@ import { Field, Input } from "../../ui/input";
 import { useAdmin } from "../admin-shell";
 import { ErrorText, Section } from "../section";
 
-// who someone is and what they can reach. save only shows once something changed
+// who someone is and what they can reach. save only shows once something changed, and a
+// change saved elsewhere shows up unless it's being edited here
 export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; saveLabel: string }> = ({
   user,
   onSave,
@@ -14,6 +15,11 @@ export const UserForm: FC<{ user: User; onSave: (u: User) => Promise<void>; save
 }) => {
   const { appIDs } = useAdmin();
   const [u, setU] = useState(user);
+  const [base, setBase] = useState(user);
+  if (JSON.stringify(user) !== JSON.stringify(base)) {
+    if (JSON.stringify(u) === JSON.stringify(base)) setU(user);
+    setBase(user);
+  }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   // apps that were granted but have no container right now stay listed

@@ -27,7 +27,7 @@ export const NarrowPage: FC<{
   </div>
 );
 
-// the request id is the page's first, polling would change it every few seconds
+// the request id is the page's first, live reloads would change it
 const Footer: FC<{ me: Me }> = ({ me }) => {
   const [requestId] = useState(me.requestId);
   return (

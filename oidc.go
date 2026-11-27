@@ -42,7 +42,7 @@ func (g *gate) oidc(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oidc/userinfo", g.userinfo)
 }
 
-func (g *gate) issuer() string { return "https://" + g.hosts("") }
+func (g *gate) issuer() string { return "https://" + g.selfHost() }
 
 func (g *gate) discovery(w http.ResponseWriter, _ *http.Request) {
 	iss := g.issuer()
@@ -101,12 +101,7 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request) {
 		fail("invalid_request", "Only S256 code challenges are supported")
 		return
 	}
-	id, err := g.identify(w, r, "")
-	if err != nil {
-		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "sign in failed")
-		return
-	}
+	id := requestOf(r.Context()).ident
 	if id == nil || !canSignIn(id.user, c) {
 		g.page(w, r)
 		return
@@ -212,30 +207,13 @@ func (g *gate) oidcError(w http.ResponseWriter, r *http.Request, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 }
 
-func (g *gate) jwks(w http.ResponseWriter, r *http.Request) {
-	key, err := g.signingKey()
-	if err != nil {
-		g.oidcError(w, r, err)
-		return
-	}
+func (g *gate) jwks(w http.ResponseWriter, _ *http.Request) {
+	key := g.signer
 	b64 := base64.RawURLEncoding.EncodeToString
 	writeJSON(w, http.StatusOK, map[string]any{"keys": []map[string]string{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": keyID(key),
 		"n": b64(key.N.Bytes()), "e": b64(big.NewInt(int64(key.E)).Bytes()),
 	}}})
-}
-
-func (g *gate) signingKey() (*rsa.PrivateKey, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.signer == nil {
-		key, err := g.db.SigningKey()
-		if err != nil {
-			return nil, err
-		}
-		g.signer = key
-	}
-	return g.signer, nil
 }
 
 func keyID(key *rsa.PrivateKey) string {
@@ -246,10 +224,7 @@ func keyID(key *rsa.PrivateKey) string {
 
 // sign makes an RS256 JWT
 func (g *gate) sign(claims map[string]any) (string, error) {
-	key, err := g.signingKey()
-	if err != nil {
-		return "", err
-	}
+	key := g.signer
 	header, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": keyID(key)})
 	body, err := json.Marshal(claims)
 	if err != nil {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -28,19 +30,15 @@ func (g *gate) web(funnel bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", g.page)
 	mux.HandleFunc("GET /login", g.login)
-	mux.HandleFunc("GET /assets/", func(w http.ResponseWriter, r *http.Request) {
-		a := uiAssets()[r.URL.Path]
-		if a == nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		a.serve(w, r)
-	})
+	mux.Handle("GET /assets/", assets(ui))
 
 	mux.HandleFunc("GET /api/me", g.api(false, g.me))
+	mux.HandleFunc("GET /api/events", g.stream)
 	mux.HandleFunc("POST /api/login", g.api(false, g.signIn))
 	mux.HandleFunc("POST /api/logout", g.api(false, g.signOut))
+	if g.passkeys {
+		g.passkeyRoutes(mux)
+	}
 	g.oidc(mux)
 	if funnel {
 		for _, path := range []string{"/setup", "/admin", "/admin/"} {
@@ -56,16 +54,25 @@ func (g *gate) web(funnel bool) http.Handler {
 	// from posting here. this refuses cross origin writes to every route, while
 	// apps swapping oidc codes send no origin and pass
 	h := http.NewCrossOriginProtection().Handler(mux)
-	return requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return compressed(requests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Robots-Tag", noindex)
+		if !strings.HasPrefix(r.URL.Path, "/assets/") {
+			id, err := g.identify(w, r, "")
+			if err != nil {
+				slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
+				plain(w, r, http.StatusInternalServerError, "sign in failed")
+				return
+			}
+			requestOf(r.Context()).ident = id
+		}
 		if (funnel || r.URL.Path == tracePath) && !g.selfRules(w, r) {
 			return
 		}
 		h.ServeHTTP(w, r)
-	}))
+	})))
 }
 
 // selfRules answers the trace and, over funnel, runs the pre-auth rules on
@@ -73,13 +80,8 @@ func (g *gate) web(funnel bool) http.Handler {
 // can't lock admins out of the page that fixes it. It's false once the request
 // is answered
 func (g *gate) selfRules(w http.ResponseWriter, r *http.Request) bool {
-	id, err := g.identify(w, r, "")
-	if err != nil {
-		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "sign in failed")
-		return false
-	}
-	hostname, _, _ := strings.Cut(g.hosts(""), ".")
+	id := requestOf(r.Context()).ident
+	hostname, _, _ := strings.Cut(g.selfHost(), ".")
 	req, err := g.ruleRequest(r, app.App{Hostname: hostname, Funnel: true, Noindex: true})
 	if err != nil {
 		slog.Error("reading the request for rules failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
@@ -117,6 +119,9 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/keys/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
 		return nil, g.db.RevokeKey(r.PathValue("id"))
 	}))
+	mux.HandleFunc("DELETE /api/admin/passkeys/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
+		return nil, g.db.DeletePasskey(r.PathValue("id"))
+	}))
 	mux.HandleFunc("POST /api/admin/users/{id}/logins", g.api(true, g.linkLogin))
 	mux.HandleFunc("DELETE /api/admin/logins/{id}", g.api(true, func(_ http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -143,24 +148,19 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 }
 
 func (g *gate) page(w http.ResponseWriter, r *http.Request) {
-	index := uiAssets()["/index.html"]
-	if index == nil {
+	if index() == nil {
 		plain(w, r, http.StatusServiceUnavailable, "ui was not built into this binary")
 		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	index.serve(w, r)
+	w.Write(index())
 }
 
 // login skips the login page when the visitor is already signed in and can
 // reach the app they came from
 func (g *gate) login(w http.ResponseWriter, r *http.Request) {
-	id, err := g.identify(w, r, "")
-	if err != nil {
-		slog.Error("reading credentials failed", "request_id", requestOf(r.Context()).id, "error", err.Error())
-		plain(w, r, http.StatusInternalServerError, "sign in failed")
-		return
-	}
+	id := requestOf(r.Context()).ident
 	to := r.URL.Query().Get("to")
 	if id != nil && to == "" {
 		redirect(w, "/")
@@ -168,7 +168,7 @@ func (g *gate) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if id != nil {
 		if t, err := g.target(to); err == nil && id.user.HasAccess(t.app) {
-			redirect(w, g.continueURL(id, t))
+			redirect(w, g.continueURL(id, t, r.URL.Query().Get("state")))
 			return
 		}
 	}
@@ -184,7 +184,8 @@ type target struct {
 func (g *gate) target(to string) (target, error) {
 	name, path, _ := strings.Cut(to, ":")
 	_, ok := g.route(name)
-	host := g.hosts(name)
+	st, _ := g.appStatus(name)
+	host := st.DNSName
 	// a path starting with // or /\ is another host to a browser. one error for
 	// everything, so funnel visitors can't use it to find out which apps exist
 	if !ok || host == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
@@ -193,12 +194,15 @@ func (g *gate) target(to string) (target, error) {
 	return target{app: name, host: host, path: path}, nil
 }
 
-func (g *gate) continueURL(id *identity, t target) string {
-	if id.via == "tailnet" {
+// continueURL sends a signed in visitor on to the app with a code for an app session, made
+// for the browser that holds state. Without state, like for a link someone sent, the app
+// is opened instead, which sends the visitor back with this browser's own state
+func (g *gate) continueURL(id *identity, t target, state string) string {
+	if id.via == "tailnet" || state == "" {
 		// the app signs a linked login in by itself
 		return "https://" + t.host + t.path
 	}
-	c := g.codes.add(code{app: t.app, path: t.path, userID: id.user.ID, keyID: id.keyID, parent: id.session}, time.Minute)
+	c := g.codes.add(code{app: t.app, path: t.path, state: state, userID: id.user.ID, cred: id.cred, parent: id.session}, time.Minute)
 	return "https://" + t.host + callbackPath + "?code=" + c
 }
 
@@ -211,17 +215,25 @@ func (e *apiError) Error() string { return e.msg }
 
 func badRequest(msg string) error { return &apiError{http.StatusBadRequest, msg} }
 
-// api runs fn for a JSON endpoint
+// api runs fn for a JSON endpoint. Admin endpoints need a key or passkey session, since a
+// tailnet login is any device its owner left unlocked. Every admin change tells open pages
 func (g *gate) api(admin bool, fn func(http.ResponseWriter, *http.Request, *identity) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		id, err := g.identify(w, r, "")
-		if err == nil && admin && (id == nil || !id.user.Admin) {
+		id := requestOf(r.Context()).ident
+		var err error
+		switch {
+		case admin && (id == nil || !id.user.Admin):
 			err = &apiError{http.StatusForbidden, "Only admins can do that"}
+		case admin && id.via != "session":
+			err = &apiError{http.StatusForbidden, "Sign in with your key or a passkey to use the admin pages"}
 		}
 		var v any
 		if err == nil {
 			v, err = fn(w, r, id)
+		}
+		if err == nil && admin && r.Method != http.MethodGet {
+			g.events.bump()
 		}
 		var ae *apiError
 		switch {
@@ -256,8 +268,9 @@ func decode(r *http.Request, v any) error {
 
 type link struct {
 	Name string `json:"name"`
-	URL  string `json:"url"`
-	// Funnel is whether it can be opened from the internet
+	// URL is "" until the app is online
+	URL string `json:"url"`
+	// Funnel is whether it can be opened from the internet right now
 	Funnel bool `json:"funnel"`
 }
 
@@ -269,10 +282,15 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		Apps   []link      `json:"apps"`
 		Target string      `json:"target,omitempty"`
 		Error  string      `json:"error,omitempty"`
+		// Keys and Passkeys are how the user signs in
+		Keys     []store.Key     `json:"keys,omitempty"`
+		Passkeys []store.Passkey `json:"passkeys,omitempty"`
+		// PasskeysOn is TAILGATE_PASSKEYS
+		PasskeysOn bool `json:"passkeysOn"`
 		// Ingress and RequestID are for the page footer, so a visitor can say how they came and which request it was
 		Ingress   string `json:"ingress"`
 		RequestID string `json:"requestId"`
-	}{Apps: []link{}, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
+	}{Apps: []link{}, PasskeysOn: g.passkeys, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
 	// client is the oidc client the login page is signing in to
 	var client *store.OIDCClient
 	if clientID := r.URL.Query().Get("client"); clientID != "" {
@@ -293,14 +311,20 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		return res, nil
 	}
 	res.User, res.Via, res.Login = id.user, id.via, id.login
+	d, err := g.db.UserDetail(id.user.ID)
+	if err != nil {
+		return nil, err
+	}
+	res.Keys, res.Passkeys = d.Keys, d.Passkeys
 	if client != nil && id.user.HasAccess(client.App) && id.user.Email == "" {
 		res.Error = id.user.Name + " has no email, which signing in to " + g.hostname(client.App) + " needs. Ask an admin to add one"
 	}
 	for _, s := range g.routed() {
 		if id.user.HasAccess(s.ID) {
-			l := link{Name: s.Hostname, Funnel: s.Funnel}
-			if host := g.hosts(s.ID); host != "" {
-				l.URL = "https://" + host
+			l := link{Name: s.Hostname}
+			// a node that couldn't turn funnel on still serves the tailnet
+			if st, ok := g.appStatus(s.ID); ok && (st.State == node.Online || st.State == node.FunnelNotAllowed) {
+				l.URL, l.Funnel = "https://"+st.DNSName, st.Funnel
 			}
 			res.Apps = append(res.Apps, l)
 		}
@@ -308,7 +332,7 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 	return res, nil
 }
 
-func (g *gate) signIn(w http.ResponseWriter, r *http.Request, _ *identity) (any, error) {
+func (g *gate) signIn(w http.ResponseWriter, r *http.Request, id *identity) (any, error) {
 	var body struct{ Key string }
 	if err := decode(r, &body); err != nil {
 		return nil, err
@@ -320,23 +344,33 @@ func (g *gate) signIn(w http.ResponseWriter, r *http.Request, _ *identity) (any,
 	if err != nil {
 		return nil, err
 	}
-	if old, err := r.Cookie(cookieName); err == nil {
-		if s, err := g.db.Session(old.Value, ""); err == nil {
-			g.db.DeleteSession(s.ID)
-		}
-	}
-	token, err := g.db.CreateSession(u.ID, keyID, "", "")
-	if err != nil {
+	if err := g.startSession(w, r, id, u, store.Cred{KeyID: keyID}); err != nil {
 		return nil, err
 	}
-	setCookie(w, token)
+	// the page asks only when the device has a built in authenticator, which it can tell and we can't
+	passkeys, err := g.db.Passkeys(u.ID)
+	return map[string]bool{"offerPasskey": g.passkeys && !u.SkipPasskeyPrompt && len(passkeys) == 0}, err
+}
+
+// startSession signs the visitor in as u, replacing the session they had
+func (g *gate) startSession(w http.ResponseWriter, r *http.Request, old *identity, u *store.User, c store.Cred) error {
+	if old != nil && old.via == "session" {
+		if err := g.db.DeleteSession(old.session); err != nil {
+			return err
+		}
+	}
+	token, err := g.db.CreateSession(u.ID, c, "", "")
+	if err != nil {
+		return err
+	}
+	setCookie(w, token, time.Now().Add(store.SessionLifetime))
 	req := requestOf(r.Context())
-	req.user, req.via = u.Name, "key"
-	return nil, nil
+	req.user, req.via = u.Name, "session"
+	return nil
 }
 
 func (g *gate) signOut(w http.ResponseWriter, r *http.Request, id *identity) (any, error) {
-	clearCookie(w)
+	clearCookie(w, cookieName)
 	if id != nil && id.via == "session" {
 		return nil, g.db.DeleteSession(id.session)
 	}
@@ -361,6 +395,7 @@ func (g *gate) setup(_ http.ResponseWriter, r *http.Request, _ *identity) (any, 
 	}
 	slog.Info("setup is done, starting apps", "admin", name)
 	g.refresh()
+	g.events.bump()
 	return map[string]string{"key": key}, nil
 }
 
@@ -448,7 +483,9 @@ func (g *gate) tailnetLogins(_ http.ResponseWriter, r *http.Request, _ *identity
 
 func (g *gate) adminApps(http.ResponseWriter, *http.Request, *identity) (any, error) {
 	type nodeInfo struct {
-		State       string `json:"state,omitempty"`
+		State string `json:"state,omitempty"`
+		// Funnel is whether funnel is really on, not just asked for
+		Funnel      bool   `json:"funnelOn,omitempty"`
 		URL         string `json:"url,omitempty"`
 		SignCommand string `json:"signCommand,omitempty"`
 		NodeError   string `json:"nodeError,omitempty"`
@@ -470,7 +507,7 @@ func (g *gate) adminApps(http.ResponseWriter, *http.Request, *identity) (any, er
 		Error   string `json:"error,omitempty"`
 	}
 	nodeOf := func(st node.Status) nodeInfo {
-		n := nodeInfo{State: string(st.State), SignCommand: st.SignCommand, TailscaleService: st.Service}
+		n := nodeInfo{State: string(st.State), Funnel: st.Funnel, SignCommand: st.SignCommand, TailscaleService: st.Service}
 		if st.DNSName != "" {
 			n.URL = "https://" + st.DNSName
 		}
@@ -492,10 +529,8 @@ func (g *gate) adminApps(http.ResponseWriter, *http.Request, *identity) (any, er
 	if self := g.nodes.Self(); self != nil {
 		res.Tailgate = nodeOf(self.Status())
 	}
-	if g.geo != nil {
-		if p := g.geo.Problem(); p != "" {
-			res.Problems = append(res.Problems, p)
-		}
+	if p := g.nodes.Problem(); p != "" {
+		res.Problems = append(res.Problems, p)
 	}
 	if dockerErr != nil {
 		res.Problems = append(res.Problems, "Docker can't be read, so changes to containers aren't picked up: "+dockerErr.Error())
@@ -528,6 +563,8 @@ func (g *gate) adminApps(http.ResponseWriter, *http.Request, *identity) (any, er
 
 type ruleList struct {
 	Rules []rules.Rule `json:"rules"`
+	// Version is a hash of the saved rules, so a save from a page that loaded older ones is refused
+	Version string `json:"version"`
 	// Error is why the saved rules can't be loaded
 	Error string `json:"error,omitempty"`
 	// Errors are the problems that stopped a save
@@ -539,7 +576,7 @@ func (g *gate) listRules(http.ResponseWriter, *http.Request, *identity) (any, er
 	if err != nil {
 		return nil, err
 	}
-	res := ruleList{Rules: list}
+	res := ruleList{Rules: list, Version: rulesVersion(list)}
 	if _, err := g.ruleSet(); err != nil {
 		res.Error = err.Error()
 	}
@@ -559,7 +596,17 @@ func (g *gate) saveRules(_ http.ResponseWriter, r *http.Request, _ *identity) (a
 	}
 	set, errs := rules.Compile(body.Rules)
 	if errs != nil {
-		return ruleList{Rules: body.Rules, Errors: errs}, nil
+		return ruleList{Rules: body.Rules, Version: body.Version, Errors: errs}, nil
+	}
+	// one lock around reading and saving, so two saves can't both pass the version check
+	g.saving.Lock()
+	defer g.saving.Unlock()
+	saved, err := g.db.Rules()
+	if err != nil {
+		return nil, err
+	}
+	if rulesVersion(saved) != body.Version {
+		return nil, &apiError{http.StatusConflict, "The rules were changed somewhere else since this page loaded them. Copy your changes and reload"}
 	}
 	if err := g.db.SaveRules(body.Rules); err != nil {
 		return nil, err
@@ -568,7 +615,13 @@ func (g *gate) saveRules(_ http.ResponseWriter, r *http.Request, _ *identity) (a
 	g.rules, g.rulesErr = set, nil
 	g.mu.Unlock()
 	slog.Info("saved the rules", "rules", len(body.Rules))
-	return ruleList{Rules: body.Rules}, nil
+	return ruleList{Rules: body.Rules, Version: rulesVersion(body.Rules)}, nil
+}
+
+func rulesVersion(list []rules.Rule) string {
+	b, _ := json.Marshal(append([]rules.Rule{}, list...))
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
 }
 
 // checkRule compiles one expression while the admin types

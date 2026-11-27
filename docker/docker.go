@@ -151,9 +151,10 @@ func network(out Container, c apiContainer, byRef map[string]apiContainer, gatew
 	return out
 }
 
-// Watch calls fn for every container and network event until ctx ends or the stream breaks
+// Watch calls fn for every event that can change an app until ctx ends or the stream breaks.
+// health checks and execs are container events too, and some containers run them every few seconds
 func (c *Client) Watch(ctx context.Context, fn func()) error {
-	filters := url.QueryEscape(`{"type":["container","network"]}`)
+	filters := url.QueryEscape(`{"type":["container","network"],"event":["create","start","die","destroy","rename","update","connect","disconnect"]}`)
 	req, err := http.NewRequestWithContext(ctx, "GET", c.base+"/events?filters="+filters, nil)
 	if err != nil {
 		return err

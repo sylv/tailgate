@@ -27,9 +27,8 @@ const tabs = [
 export const AdminShell: FC<{
   attention: boolean;
   name: string;
-  canSignOut: boolean;
   children: ReactNode;
-}> = ({ attention, name, canSignOut, children }) => (
+}> = ({ attention, name, children }) => (
   <div className="flex min-h-dvh flex-col">
     <header className="mx-auto grid w-full max-w-5xl grid-cols-[1fr_auto] items-center gap-y-3 px-4 pt-5 md:grid-cols-[1fr_auto_1fr] md:px-8">
       <a href="/" className="w-fit">
@@ -52,12 +51,9 @@ export const AdminShell: FC<{
         <a href="/" className="text-[13px] text-fg-muted underline-offset-2 hover:text-fg hover:underline">
           {name}
         </a>
-        {/* a tailnet login can't sign out, its device signs it in again */}
-        {canSignOut && (
-          <IconButton label="Sign out" size="sm" className="-mr-1.5" onClick={() => signOut("/login")}>
-            <SignOutIcon />
-          </IconButton>
-        )}
+        <IconButton label="Sign out" size="sm" className="-mr-1.5" onClick={() => signOut("/login")}>
+          <SignOutIcon />
+        </IconButton>
       </div>
     </header>
     <main className="mx-auto w-full max-w-5xl flex-1 px-4 pt-10 pb-24 md:px-8">{children}</main>

@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sylv/tailgate/store"
 )
 
-// fakeAPI is the tailscale api with the given scope, tailscale services and device ids
-func fakeAPI(t *testing.T, scope string, services map[string]apiService, devices ...string) {
+// fakeAPI is the tailscale api with the given scope and tailscale services
+func fakeAPI(t *testing.T, scope string, services map[string]apiService) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/tailnet/-/vip-services/")
 		switch {
@@ -20,12 +22,6 @@ func fakeAPI(t *testing.T, scope string, services map[string]apiService, devices
 			json.NewEncoder(w).Encode(map[string]any{"access_token": "t", "expires_in": 3600, "scope": scope, "tags": tag})
 		case r.Header.Get("Authorization") != "Bearer t":
 			w.WriteHeader(http.StatusUnauthorized)
-		case r.URL.Path == "/tailnet/-/devices":
-			var list []map[string]string
-			for _, id := range devices {
-				list = append(list, map[string]string{"nodeId": id})
-			}
-			json.NewEncoder(w).Encode(map[string]any{"devices": list})
 		case r.URL.Path == "/tailnet/-/keys":
 			json.NewEncoder(w).Encode(map[string]string{"key": "tskey-auth-new"})
 		case r.URL.Path == "/tailnet/-/vip-services":
@@ -56,7 +52,7 @@ const secret = "tskey-client-kTEST-abc"
 
 func TestAPI(t *testing.T) {
 	ctx := context.Background()
-	for _, scope := range []string{"devices:core:read services", "auth_keys devices:core services"} {
+	for _, scope := range []string{"services", "auth_keys devices:core:read services"} {
 		fakeAPI(t, scope, map[string]apiService{})
 		if _, err := NewAPI(ctx, secret); err == nil {
 			t.Fatalf("a client with %s was accepted", scope)
@@ -67,7 +63,7 @@ func TestAPI(t *testing.T) {
 		"svc:old":   {Name: "svc:old", Tags: []string{tag}},
 		"svc:notes": {Name: "svc:notes"},
 	}
-	fakeAPI(t, "auth_keys services devices:core:read", services)
+	fakeAPI(t, "services auth_keys", services)
 	a, err := NewAPI(ctx, secret)
 	if err != nil {
 		t.Fatal(err)
@@ -97,36 +93,45 @@ func TestAPI(t *testing.T) {
 	}
 }
 
-// a node's state dir is dropped once its device is gone from the tailnet, and kept while it's there
+// a node's state dir is dropped once the tailgate node stops seeing its device, and kept while it's there
 func TestPrune(t *testing.T) {
-	ctx := context.Background()
 	dir := t.TempDir()
-	state := func(name, id string) {
-		profiles, _ := json.Marshal(map[string]any{"a5a4": map[string]string{"ID": "a5a4", "Key": "profile-a5a4", "NodeID": id}})
-		b, _ := json.Marshal(map[string][]byte{"_current-profile": []byte("profile-a5a4"), "_profiles": profiles})
-		os.MkdirAll(filepath.Join(dir, "nodes", name), 0o700)
-		os.WriteFile(filepath.Join(dir, "nodes", name, "tailscaled.state"), b, 0o600)
-	}
-	state("photos", "nKEPT")
-	state("old", "nGONE")
-	state("funnel", "nGONE2")
-	fakeAPI(t, "auth_keys services devices:core:read", map[string]apiService{"svc:notes": {Name: "svc:notes", Tags: []string{tag}}}, "nKEPT")
-	a, err := NewAPI(ctx, secret)
+	db, err := store.Open(filepath.Join(dir, "tailgate.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(dir, a)
-	// notes was deleted in the admin console after tailgate started
-	fakeAPI(t, "auth_keys services devices:core:read", map[string]apiService{}, "nKEPT")
-	pruned, err := m.Prune(ctx, map[string]bool{"funnel": true})
-	if err != nil || !pruned {
-		t.Fatal(pruned, err)
+	defer db.Close()
+	m, err := NewManager(dir, nil, db, func() {}, func() {})
+	if err != nil {
+		t.Fatal(err)
 	}
-	left, _ := m.Unused(map[string]bool{"funnel": true})
-	if len(left) != 1 || left[0] != "photos" {
+	for name, id := range map[string]string{"photos": "nKEPT", "old": "nGONE", "funnel": "nGONE2"} {
+		os.MkdirAll(filepath.Join(dir, "nodes", name), 0o700)
+		m.saveDevice(name, id)
+	}
+	inUse := map[string]bool{"funnel": true}
+	// nothing is pruned until the tailgate node has seen its peers
+	if left := m.Unused(inUse); len(left) != 2 {
+		t.Fatalf("left %v", left)
+	}
+	// or while it can't see a running node, which means the grant is missing
+	m.peers = map[string]bool{"nKEPT": true}
+	m.nodes["running"] = &Node{box: box{name: "running", status: Status{State: Online}}}
+	m.saveDevice("running", "nHIDDEN")
+	if left := m.Unused(inUse); len(left) != 2 || m.Problem() == "" {
+		t.Fatalf("left %v with problem %q", left, m.Problem())
+	}
+	m.peers["nHIDDEN"] = true
+	if left := m.Unused(inUse); len(left) != 1 || left[0] != "photos" {
 		t.Errorf("left %v", left)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "nodes", "old")); err == nil {
+		t.Error("a deleted node's state was kept")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "nodes", "funnel")); err != nil {
 		t.Error("an in use node's state was dropped")
+	}
+	if nodes, _ := db.Nodes(); nodes["old"] != "" || len(nodes) != 3 {
+		t.Errorf("saved nodes are %v", nodes)
 	}
 }

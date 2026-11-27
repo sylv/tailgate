@@ -13,8 +13,10 @@ import (
 
 const (
 	cookieName = "__Host-tailgate_session"
-	keyHeader  = "X-Tailgate-Key"
-	keyPrefix  = "tg_"
+	// stateCookie ties a callback code to the browser that was sent to sign in, see authorized
+	stateCookie = "__Host-tailgate_state"
+	keyHeader   = "X-Tailgate-Key"
+	keyPrefix   = "tg_"
 )
 
 type identity struct {
@@ -22,7 +24,7 @@ type identity struct {
 	// via is session, key or tailnet
 	via     string
 	session string
-	keyID   string
+	cred    store.Cred
 	// login is the linked tailnet login when via is tailnet
 	login string
 }
@@ -31,15 +33,12 @@ type identity struct {
 // are none. host is the app, or "" for the tailgate node, which doesn't
 // take the header keys apps use
 func (g *gate) identify(w http.ResponseWriter, r *http.Request, host string) (*identity, error) {
-	req := requestOf(r.Context())
-	if !req.identified {
-		req.ident, req.identErr = g.credentials(w, r, host)
-		req.identified = true
-		if req.ident != nil {
-			req.user, req.via = req.ident.user.Name, req.ident.via
-		}
+	id, err := g.credentials(w, r, host)
+	if id != nil {
+		req := requestOf(r.Context())
+		req.user, req.via = id.user.Name, id.via
 	}
-	return req.ident, req.identErr
+	return id, err
 }
 
 func (g *gate) credentials(w http.ResponseWriter, r *http.Request, host string) (*identity, error) {
@@ -47,9 +46,9 @@ func (g *gate) credentials(w http.ResponseWriter, r *http.Request, host string) 
 		s, err := g.db.Session(c.Value, host)
 		if err == nil {
 			if s.Refreshed {
-				setCookie(w, c.Value)
+				setCookie(w, c.Value, s.Expires)
 			}
-			return &identity{user: s.User, via: "session", session: s.ID, keyID: s.KeyID}, nil
+			return &identity{user: s.User, via: "session", session: s.ID, cred: s.Cred}, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return nil, err
@@ -62,7 +61,7 @@ func (g *gate) credentials(w http.ResponseWriter, r *http.Request, host string) 
 			}
 			u, keyID, err := g.db.KeyUser(key)
 			if err == nil {
-				return &identity{user: u, via: "key", keyID: keyID}, nil
+				return &identity{user: u, via: "key", cred: store.Cred{KeyID: keyID}}, nil
 			}
 			if !errors.Is(err, store.ErrNotFound) {
 				return nil, err
@@ -92,15 +91,15 @@ func bearer(h http.Header) string {
 	if !strings.EqualFold(scheme, "bearer") {
 		return ""
 	}
-	return token
+	return strings.TrimSpace(token)
 }
 
-func setCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", MaxAge: int(store.SessionLifetime.Seconds()), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+func setCookie(w http.ResponseWriter, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", MaxAge: int(time.Until(expires).Seconds()), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
-func clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+func clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 // stripCredentials removes every tailgate credential so none reach the app.
@@ -130,10 +129,12 @@ func navigation(r *http.Request) bool {
 	return r.Header.Get("Sec-Fetch-Mode") == "navigate" || r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// code is a single use code that swaps a tailgate node session for a session on an app
+// code is a single use code that swaps a tailgate node session for a session on an app.
+// state is the app's state cookie in the browser that was sent to sign in
 type code struct {
-	app, path             string
-	userID, keyID, parent string
+	app, path, state string
+	userID, parent   string
+	cred             store.Cred
 }
 
 // tokens holds short lived codes and tokens in memory, so a restart ends them

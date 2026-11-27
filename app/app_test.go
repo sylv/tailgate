@@ -18,11 +18,11 @@ func one(t *testing.T, labels map[string]string) App {
 
 func TestValid(t *testing.T) {
 	s := one(t, map[string]string{
-		"tailgate.id":                       "photos",
-		"tailgate.port":                     "2283",
-		"tailgate.funnel":                   "true",
-		"tailgate.dangerously-disable-auth": "false",
-		"traefik.enable":                    "true",
+		"tailgate.id":                     "photos",
+		"tailgate.port":                   "2283",
+		"tailgate.funnel":                 "true",
+		"tailgate.dangerouslyDisableAuth": "false",
+		"traefik.enable":                  "true",
 	})
 	want := App{Container: "c1", ID: "photos", Hostname: "photos", Port: 2283, Funnel: true, Noindex: true}
 	if s != want {
@@ -31,11 +31,14 @@ func TestValid(t *testing.T) {
 }
 
 func TestSpellings(t *testing.T) {
-	for _, key := range []string{"tailgate.dangerously-disable-auth", "tailgate.dangerouslyDisableAuth", "tailgate.dangerously_disable_auth"} {
-		s := one(t, map[string]string{"tailgate.id": "plex", "tailgate.port": "32400", key: "true"})
-		if s.Err != nil || !s.DangerouslyDisableAuth {
-			t.Errorf("%s: got %+v", key, s)
-		}
+	s := one(t, map[string]string{"tailgate.id": "plex", "tailgate.port": "32400", "tailgate.dangerouslyDisableAuth": "true"})
+	if s.Err != nil || !s.DangerouslyDisableAuth {
+		t.Errorf("got %+v", s)
+	}
+	// other spellings say which one was meant
+	s = one(t, map[string]string{"tailgate.id": "plex", "tailgate.port": "32400", "tailgate.dangerously-disable-auth": "true"})
+	if s.Err == nil || !strings.Contains(s.Err.Error(), "did you mean tailgate.dangerouslyDisableAuth") || s.DangerouslyDisableAuth {
+		t.Errorf("got %+v", s)
 	}
 }
 
@@ -81,7 +84,7 @@ func TestErrors(t *testing.T) {
 		"other spelling":      {with("tailgate.dangerously-disableAuth", "true"), "unknown label"},
 		"funnel typo":         {with("tailgate.funnel", "yes"), "must be true or false"},
 		"funnel capital":      {with("tailgate.funnel", "True"), "must be true or false"},
-		"auth typo":           {with("tailgate.dangerously-disable-auth", "1"), "must be true or false"},
+		"auth typo":           {with("tailgate.dangerouslyDisableAuth", "1"), "must be true or false"},
 		"missing name":        {with("tailgate.id", "<unset>"), "tailgate.id is required"},
 		"empty name":          {with("tailgate.id", ""), "tailgate.id is required"},
 		"path in name":        {with("tailgate.id", "../etc"), "lowercase letters"},
@@ -93,7 +96,6 @@ func TestErrors(t *testing.T) {
 		"port too big":        {with("tailgate.port", "65536"), "from 1 to 65535"},
 		"port with sign":      {with("tailgate.port", "+80"), "from 1 to 65535"},
 		"empty network":       {with("tailgate.network", ""), "tailgate.network is empty"},
-		"two spellings":       {with("tailgate.dangerously-disable-auth", "false", "tailgate.dangerouslyDisableAuth", "true"), "are the same key"},
 		"only an unknown key": {map[string]string{"tailgate.enable": "true"}, "unknown label"},
 	}
 	for name, c := range cases {

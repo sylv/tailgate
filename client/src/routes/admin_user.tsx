@@ -1,7 +1,7 @@
 import { ArrowLeftIcon, DotsThreeIcon, KeyIcon, TrashIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, type Login, type NewKey, type User, type UserDetail } from "../api";
+import { api, type NewKey, type User, type UserDetail } from "../api";
 import { PageHeader } from "../components/admin-shell";
 import { Confirm } from "../components/confirm";
 import { ErrorText } from "../components/section";
@@ -9,7 +9,7 @@ import { KeyDialog } from "../components/key-dialog";
 import { Keys } from "../components/users/keys";
 import { Logins } from "../components/users/logins";
 import { UserForm } from "../components/users/user-form";
-import { POLL, useLoad } from "../hooks/use-load";
+import { useLoad } from "../hooks/use-load";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu";
@@ -49,8 +49,7 @@ export function UserRoute() {
 
 function ExistingUser({ id }: { id: string }) {
   const navigate = useNavigate();
-  const [users, error, reload] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), POLL);
-  const [logins] = useLoad(() => api<Login[]>("GET", "/api/admin/logins"), POLL);
+  const [users, error, reload] = useLoad(() => api<UserDetail[]>("GET", "/api/admin/users"), true);
   const [confirming, setConfirming] = useState<"reset" | "delete">();
   const [revealed, setRevealed] = useState<{ k: NewKey; title: string }>();
 
@@ -78,7 +77,7 @@ function ExistingUser({ id }: { id: string }) {
               <MenuItem
                 icon={<KeyIcon />}
                 onSelect={() => setConfirming("reset")}
-                disabled={!user.keys.length}
+                disabled={!user.keys.length && !user.passkeys.length}
               >
                 Reset keys
               </MenuItem>
@@ -92,8 +91,7 @@ function ExistingUser({ id }: { id: string }) {
       />
       <div className="grid gap-x-16 gap-y-12 lg:grid-cols-2">
         <UserForm
-          // remount on save, so the saved user is the new baseline
-          key={JSON.stringify(profile)}
+          key={user.id}
           user={profile}
           saveLabel="Save"
           onSave={async (u) => {
@@ -107,14 +105,14 @@ function ExistingUser({ id }: { id: string }) {
             reload={reload}
             onKey={(k) => setRevealed({ k, title: `New key for ${user.name}` })}
           />
-          <Logins user={user} logins={logins ?? []} reload={reload} />
+          <Logins user={user} reload={reload} />
         </div>
       </div>
       <Confirm
         open={confirming === "reset"}
         onClose={() => setConfirming(undefined)}
         title={`Reset ${user.name}'s keys?`}
-        description="Every key is revoked, their sessions end and one new key is made"
+        description="Every key and passkey is removed, their sessions end and one new key is made"
         action="Reset keys"
         onConfirm={async () => {
           const k = await api<NewKey>("POST", `/api/admin/users/${user.id}/reset-keys`);
