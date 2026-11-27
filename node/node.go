@@ -516,7 +516,7 @@ func (m *Manager) check(ctx context.Context, n *Node, lc *local.Client, tailnet,
 	if !n.joined {
 		n.joined = true
 		// a crash leaves funnel allowed and services advertised in the node's state, and
-		// ListenFunnel and ListenService never turn off what they didn't turn on
+		// ListenFunnel never turns off what it didn't turn on
 		if err := lc.SetServeConfig(ctx, &ipn.ServeConfig{}); err != nil {
 			return 0, err
 		}
@@ -623,12 +623,13 @@ func (n *Node) stopServing() {
 		slog.Info("funnel off", "node", n.name)
 	}
 	for id, h := range n.serving {
+		for _, ln := range h.lns {
+			ln.Close()
+		}
 		if h.hs != nil {
 			servers = append(servers, h.hs)
-		} else if h.ln != nil {
-			h.ln.Close()
 		}
-		h.hs, h.ln = nil, nil
+		h.hs, h.lns, h.ips = nil, nil, nil
 		if !n.shuttingDown {
 			h.to(Status{State: Starting})
 		}

@@ -7,16 +7,18 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
+	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/pires/go-proxyproto"
 	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
-	"tailscale.com/tsnet"
 )
 
 // hosted is an app the tailgate node serves as a tailscale service
@@ -32,24 +34,26 @@ type hosted struct {
 	cancel  context.CancelFunc
 
 	// only the tailgate node's run goroutine uses these
-	ln *tsnet.ServiceListener
-	// advertised is when ln started advertising the service
+	// advertised is when the node started advertising the service
 	advertised time.Time
-	hs         *http.Server
-	cert       certState
+	// lns listen on ips, the service's ips. tailscale gives them to the node once it's approved
+	lns  []net.Listener
+	ips  []netip.Addr
+	hs   *http.Server
+	cert certState
 	// fetching is set while a cert is being fetched in the background, which sends the result on certDone
 	fetching bool
 	certDone chan error
 }
 
 func (h *hosted) close() {
-	// closing the server closes the listener too, which stops advertising the service
+	for _, ln := range h.lns {
+		ln.Close()
+	}
 	if h.hs != nil {
 		go shutdown(h.hs)
-	} else if h.ln != nil {
-		h.ln.Close()
 	}
-	h.hs, h.ln = nil, nil
+	h.hs, h.lns, h.ips = nil, nil, nil
 }
 
 // Host serves an app as a tailscale service on the tailgate node, making the
@@ -153,50 +157,84 @@ func (m *Manager) serveHosted(ctx context.Context, n *Node, lc *local.Client, st
 			delete(n.serving, id)
 		}
 	}
-	// tailscale tells a host which services it's approved for in its own capabilities
-	approved := map[tailcfg.ServiceName]bool{}
-	caps, _ := tailcfg.UnmarshalNodeCapJSON[tailcfg.ServiceIPMappings](st.Self.CapMap, tailcfg.NodeAttrServiceHost)
-	for _, mapping := range caps {
-		for name := range mapping {
-			approved[name] = true
-		}
-	}
 	next := time.Hour
+	var names []tailcfg.ServiceName
 	for id, h := range want {
 		select {
 		case <-h.defined:
+			n.serving[id] = h
+			names = append(names, "svc:"+tailcfg.ServiceName(h.name))
 		default:
-			continue
 		}
-		n.serving[id] = h
-		if wait := m.serveOne(ctx, n, lc, st, h, approved["svc:"+tailcfg.ServiceName(h.name)]); wait > 0 {
+	}
+	if err := advertise(ctx, lc, names); err != nil {
+		slog.Warn("advertising tailscale services failed", "error", err.Error())
+		next = 5 * time.Second
+	}
+	// tailscale tells a host which services it's approved for, and their ips, in its own capabilities
+	addrs := map[tailcfg.ServiceName][]netip.Addr{}
+	caps, _ := tailcfg.UnmarshalNodeCapJSON[tailcfg.ServiceIPMappings](st.Self.CapMap, tailcfg.NodeAttrServiceHost)
+	for _, mapping := range caps {
+		maps.Copy(addrs, mapping)
+	}
+	for _, h := range n.serving {
+		if wait := m.serveOne(ctx, n, lc, st, h, addrs["svc:"+tailcfg.ServiceName(h.name)]); wait > 0 {
 			next = min(next, wait)
 		}
 	}
 	return next
 }
 
-func (m *Manager) serveOne(ctx context.Context, n *Node, lc *local.Client, st *ipnstate.Status, h *hosted, approved bool) time.Duration {
+// advertise makes the node host exactly these tailscale services. an empty handler for 443 in the
+// serve config is what makes netstack take a service's connections, and with no forward
+// address it hands them to whatever srv.Listen has the service's ip. ListenService would forward
+// them to a localhost socket instead, which anything sharing tailgate's network could reach
+func advertise(ctx context.Context, lc *local.Client, names []tailcfg.ServiceName) error {
+	slices.Sort(names)
+	sc, err := lc.GetServeConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		sc = new(ipn.ServeConfig)
+	}
+	svcs := map[tailcfg.ServiceName]*ipn.ServiceConfig{}
+	for _, name := range names {
+		svcs[name] = &ipn.ServiceConfig{TCP: map[uint16]*ipn.TCPPortHandler{443: {}}}
+	}
+	if len(sc.Services)+len(svcs) > 0 && !reflect.DeepEqual(sc.Services, svcs) {
+		sc.Services = svcs
+		if err := lc.SetServeConfig(ctx, sc); err != nil {
+			return err
+		}
+	}
+	prefs, err := lc.GetPrefs(ctx)
+	if err != nil {
+		return err
+	}
+	str := make([]string, len(names))
+	for i, name := range names {
+		str[i] = name.String()
+	}
+	if !slices.Equal(prefs.AdvertiseServices, str) {
+		_, err = lc.EditPrefs(ctx, &ipn.MaskedPrefs{AdvertiseServicesSet: true, Prefs: ipn.Prefs{AdvertiseServices: str}})
+	}
+	return err
+}
+
+func (m *Manager) serveOne(ctx context.Context, n *Node, lc *local.Client, st *ipnstate.Status, h *hosted, addrs []netip.Addr) time.Duration {
 	fqdn := h.name + "." + st.CurrentTailnet.MagicDNSSuffix
 	h.set(func(s *Status) { s.DNSName = fqdn })
-	if h.hs != nil && !approved {
+	if h.hs != nil && !slices.Equal(h.ips, addrs) {
 		h.close()
 	}
-	if h.ln == nil {
-		// tailscale hands connections to a localhost socket with a PROXY header saying who
-		// they're from, so anything else in tailgate's network namespace could claim any
-		// address. that's why tailgate can't share the host's network
-		ln, err := n.srv.ListenService("svc:"+h.name, tsnet.ServiceModeTCP{Port: 443, PROXYProtocolVersion: 2})
-		if err != nil {
-			h.fail(fmt.Errorf("advertising the tailscale service failed: %w", err))
-			return time.Minute
-		}
-		h.ln, h.advertised = ln, time.Now()
+	if h.advertised.IsZero() {
+		h.advertised = time.Now()
 	}
 	// approval arrives as a self change. tailscale doesn't say whether one is on its way, and
 	// tsnet stops advertising every service on start, so even auto approved services wait a
 	// few seconds after every restart. it only needs someone once it's slower than that
-	if !approved {
+	if len(addrs) == 0 {
 		if wait := time.Until(h.advertised.Add(20 * time.Second)); wait > 0 {
 			h.to(Status{State: Starting})
 			return wait
@@ -236,12 +274,20 @@ func (m *Manager) serveOne(ctx context.Context, n *Node, lc *local.Client, st *i
 		return time.Until(h.cert.next)
 	}
 	if h.hs == nil {
-		h.hs = server(fqdn, h.h, tailnetConn(lc))
-		pl := &proxyproto.Listener{
-			Listener:   h.ln,
-			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil },
+		for _, addr := range addrs {
+			ln, err := n.srv.Listen("tcp", netip.AddrPortFrom(addr, 443).String())
+			if err != nil {
+				h.close()
+				h.fail(fmt.Errorf("listening on the tailscale service's ip failed: %w", err))
+				return time.Minute
+			}
+			h.lns = append(h.lns, ln)
 		}
-		go h.hs.Serve(tls.NewListener(pl, n.tlsConfig(lc)))
+		h.ips = addrs
+		h.hs = server(fqdn, h.h, tailnetConn(lc))
+		for _, ln := range h.lns {
+			go h.hs.Serve(tls.NewListener(ln, n.tlsConfig(lc)))
+		}
 		slog.Debug("serving tailscale service", "service", h.name)
 	}
 	if h.cert.err != nil {

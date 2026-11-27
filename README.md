@@ -30,7 +30,7 @@ Funnel users who aren't on your tailnet sign in with a key, or taillscale users 
 
 ## Setup
 
-### 0. tailscale
+### 1. tailscale
 
 tailgate's nodes and tailscale services all carry `tag:tailgate`. add this to your tailnet policy:
 
@@ -39,7 +39,10 @@ tailgate's nodes and tailscale services all carry `tag:tailgate`. add this to yo
   "tagOwners": { "tag:tailgate": ["autogroup:admin"] }, // create the tailgate tag
   "nodeAttrs": [{ "target": ["tag:tailgate"], "attr": ["funnel"] }], // allow funnel on tailgate's nodes
   "autoApprovers": { "services": { "tag:tailgate": ["tag:tailgate"] } }, // let the tailgate node host the tailscale services it makes
-  "grants": [{ "src": ["autogroup:member"], "dst": ["tag:tailgate"], "ip": ["443"] }], // let tailnet members reach tailgate's nodes and tailscale services
+  "grants": [
+    { "src": ["autogroup:member"], "dst": ["tag:tailgate"], "ip": ["443"] }, // let tailnet members reach tailgate's nodes and tailscale services
+    { "src": ["tag:tailgate"], "dst": ["tag:tailgate"], "ip": ["443"] }, // let the tailgate node see its funnel nodes, so it notices when you delete one
+  ],
   // you may want to ensure tailgate nodes cannot talk to other nodes in your network
 }
 ```
@@ -51,15 +54,14 @@ then create the credential tailgate uses, in the tailscale admin console under S
 1. press "New credential" and fill in the settings step
 2. on the scopes step, pick "Custom scopes" and tick:
    - Auth Keys, write, with the tag `tag:tailgate`. tailgate makes a single use key for each new node
-   - Services, write, with the tag `tag:tailgate`. tailgate makes a tailscale service for each app on your tailnet
-   - Devices Core, read. tailgate notices when you delete an old device or tailscale service and forgets it
+   - Services, write, with the tag `tag:tailgate`. tailgate makes a tailscale service for each app on your tailnet, and deletes it once no container uses it
 3. pass the secret, `tskey-client-...`, as `TS_CLIENT_SECRET`
 
-tailgate checks the credential when it starts and won't start unless it has exactly these scopes and only the tag `tag:tailgate`, so a leaked secret can't do more. Devices Core write in particular would let it delete any device in your tailnet, since the tag doesn't limit which devices it can delete
+tailgate checks the credential when it starts and won't start unless it has exactly these scopes and only the tag `tag:tailgate`, so a leaked secret can't do more. tailscale services without `tag:tailgate` are never touched
 
 with tailnet lock on, every new node waits on the apps page until you sign it with the command shown there. that's the tailgate node on its first start and each funnel app's node, since apps on your tailnet don't get nodes
 
-### 1A. with the docker proxy
+### 2A. with the docker proxy
 
 for security, it is *strongly recommended* to use the tailgate docker proxy, which helps isolate root access if tailgate ever had a vulnerability.
 
@@ -86,8 +88,8 @@ services:
     depends_on:
       - tailgate-docker
     environment:
+      - TZ=Australia/Perth
       - TS_CLIENT_SECRET=tskey-client-...
-      - TZ=Australia/Sydney # optional, for now() in rules and log timestamps. default = UTC
       - DOCKER_HOST=unix:///run/tailgate/docker.sock
     volumes:
       - tailgate-docker:/run/tailgate
@@ -97,7 +99,7 @@ volumes:
   tailgate-docker:
 ```
 
-### 1B. as root
+### 2B. as root
 
 if you want a simpler setup, you can run tailgate as root and pass the docker socket in directly. you probably shouldn't, but its a free country.
 
@@ -108,21 +110,21 @@ services:
     user: "0"
     restart: unless-stopped
     environment:
+      - TZ=Australia/Perth
       - TS_CLIENT_SECRET=tskey-client-...
-      - TZ=Australia/Sydney # optional, for now() in rules and log timestamps. default = UTC
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.tailgate:/data
 ```
 
-Either way tailgate has to share a network with the containers it proxies to. Don't run it with `network_mode: host`, tailscale tells it who a tailnet connection is from over a localhost socket that anything on the host could reach. Back up the data volume, it has the users, keys and every node's state
+The data volume stores users, keys and node states. Keep it persistent.
 
-### 2. first start
+### 3. first start
 
 tailgate logs a setup link like `https://tailgate.your-tailnet.ts.net/setup?key=...`. open it from a device on your tailnet, pick the admin's name and save the key it gives you. until then no apps start and funnel stays off, and each restart logs a new setup link. if tailscale names the node `tailgate-1` because the name is taken, tailgate waits and logs what to rename, same as for apps. the admin page is at `https://tailgate.your-tailnet.ts.net/admin` and is not accessible outside of the tailnet.
 
 ```sh
-# if you ever lose a key, reset it like this. it revokes all of that user's keys (signing them out everywhere) and prints one new key.
+# if you ever lose a key, reset it like this. it removes all of that user's keys and passkeys (signing them out everywhere) and prints one new key.
 docker exec tailgate tailgate reset-key <user>
 # if you need to make someone an admin, or change the admin, use this
 docker exec tailgate tailgate set-admin <user> true|false
@@ -163,7 +165,9 @@ tailgate connects to the container's IP on `tailgate.network`, then `TAILGATE_NE
 
 if you delete a funnel app's device in the tailscale admin console, the app stops and waits for you to press "Log in again" on the apps page, so it doesn't come back on its own. the tailgate node logs back in by itself
 
-tailgate never deletes devices. when no container uses an app anymore, or an app stops using its node because funnel was turned off, its node or tailscale service is listed under "Left in Tailscale" on the apps page. delete it in the tailscale admin console and tailgate forgets it within a minute. an app moving off its node waits for that, since tailscale won't make a tailscale service while a device has the name. turning funnel on deletes the app's tailscale service and starts a node. each switch needs a new certificate, and let's encrypt gives each name 5 a week
+tailgate never deletes devices. when no container uses an app anymore, or an app stops using its node because funnel was turned off, its node is listed under "Left in Tailscale" on the apps page. delete its device in the tailscale admin console and tailgate forgets it, which needs the `tag:tailgate` to `tag:tailgate` grant from the setup. an app moving off its node waits for that, since tailscale won't make a tailscale service while a device has the name. tailscale services are tailgate's own, so they're deleted as soon as no container uses them. turning funnel on deletes the app's tailscale service and starts a node. each switch needs a new certificate, and let's encrypt gives each name 5 a week
+
+on a first start every app needs a certificate, so tailgate fetches new ones two at a time. let's encrypt fails orders that all arrive at once
 
 ### users and keys
 
@@ -192,6 +196,14 @@ apps and scripts can send a key with each request instead:
 
 tailgate strips its keys and cookie before the request reaches the app
 
+#### passkeys
+
+> [!WARNING] passkeys belong to the tailgate node's name, so changing `TAILGATE_HOSTNAME` or your tailnet's name breaks every passkey. sign in with a key and add them again. users may also forget their keys, but lets be honest, they were going to do that anyway.
+
+after signing in with a key on supported devices, tailgate offers to add a passkey. the login page then has a "Sign in with a passkey" button. each user's keys and passkeys are listed on their dashboard, and admins can remove them on the user's page. set `TAILGATE_PASSKEYS=false` to turn passkeys off
+
+the admin pages need a key or passkey session. an admin signed in by their tailnet login needs to re-auth with one of those.
+
 ### rules
 
 rules run on every request to an app, top to bottom. Each one has an [expr](https://expr-lang.org/docs/language-definition) condition and effects like `block`, `redirect`, `skip`, and setting or removing request and response headers. rules before the login see every request, and rules after it know who the user is
@@ -200,11 +212,13 @@ Over Funnel, rules before the login also run on tailgate's own pages, like the l
 
 Every app and tailgate itself answer `/.tailgate/trace` with what tailgate sees of your request, like cloudflare's `/cdn-cgi/trace`: your IP, country, ingress, how you're signed in and the request id. It runs before the rules, so it works even when they block you
 
-```
-before login  ingress == "funnel" && country not in ["AU", "CA"]                                   block
-before login  app.id == "wisp" && path startsWith "/mcp" && !inCidr(ip, "160.79.104.0/21")  block
-after login   app.id == "lyra"                                                                set-request-header X-User = user.name
-```
+| stage     | expression                                                                     | effect                                |
+| --------- | ------------------------------------------------------------------------------ | ------------------------------------- |
+| pre auth  | `ingress == "funnel" && country not in ["AU", "NO", "CA"]`                     | block                                 |
+| pre auth  | `app.id == "wisp" && path startsWith "/mcp" && !inCidr(ip, "160.79.104.0/21")` | block                                 |
+| post auth | `app.id == "lyra"`                                                             | set-request-header X-User = user.name |
+
+set-request-header removes the header the client sent from every request by default, also when the rule doesn't match, so nobody can send their own `X-User` to the app. untick "Remove the client's value on every request" for a header the app should still get from clients
 
 <img src=".github/screenshots/rules.png" alt="The rules page">
 
@@ -212,7 +226,7 @@ the editor autocompletes every value and function, and checks each rule as you t
 
 <img src=".github/screenshots/editor.png" alt="Editing a rule, with autocomplete and an error">
 
-country info uses [DB-IP](https://db-ip.com)
+country info uses [DB-IP](https://db-ip.com). the image has the database built in, and each rebuild gets the latest month
 
 ### OIDC
 
@@ -233,10 +247,16 @@ the apps server has to reach the tailgate node to swap codes for tokens, so the 
 | -------------------- | ----------------------------- | ------------------------------------------------------------------------------ |
 | `TS_CLIENT_SECRET`   | required                      | The secret of the [trust credential](#0-tailscale)                             |
 | `TAILGATE_HOSTNAME`  | `tailgate`                    | The name of the node with the login page, admin pages and OIDC                 |
-| `TAILGATE_DATA_DIR`  | `/data`                       | The database, every node's state and the country database                      |
-| `DOCKER_HOST`        | `unix:///var/run/docker.sock` | Where Docker is, as `unix://` or `tcp://`                                      |
+| `TAILGATE_DATA_DIR`  | `/data`                       | The database and every node's state                                            |
 | `TAILGATE_NETWORK`   |                               | The network to reach containers on when they don't set `tailgate.network`      |
-| `TZ`                 | `UTC`                         | The time zone for `now()` in rules and log timestamps                          |
+| `TAILGATE_PASSKEYS`  | `true`                        | Whether users can add passkeys and sign in with them                           |
 | `TAILGATE_LOG_JSON`  | `false`                       | Log JSON instead of coloured text                                              |
 | `TAILGATE_LOG_LEVEL` | `info`                        | `debug` also shows tailscale's own logs for each node, for connection problems |
+| `DOCKER_HOST`        | `unix:///var/run/docker.sock` | Where Docker is, as `unix://` or `tcp://`                                      |
 | `NO_COLOR`           |                               | Set to anything to log text without colour                                     |
+| `TZ`                 | `UTC`                         | The time zone for `now()` in rules and log timestamps                          |
+
+## future
+
+- running several tailgate instances for high availability. today each app's node and tailscale service has one host, and sessions, codes and cert fetches live in one process, so two instances would fight over the same names (?)
+- giving the oauth client `devices:core` again. read access would show whether a tailscale service is approved for the tailgate node, instead of waiting 20 seconds before saying it needs approval. write access would let tailgate approve itself, so the `autoApprovers` line goes, and delete the old device that holds an app's name. write access can also delete or authorize any device in the tailnet, which is why tailgate doesn't already use it.

@@ -9,7 +9,6 @@ require (
 	github.com/klauspost/compress v1.20.2
 	github.com/lmittmann/tint v1.2.1
 	github.com/oschwald/maxminddb-golang/v2 v2.9.1
-	github.com/pires/go-proxyproto v0.15.0
 	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.63.0
 	tailscale.com v1.106.1
@@ -43,6 +42,7 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
+	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/safchain/ethtool v0.7.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
