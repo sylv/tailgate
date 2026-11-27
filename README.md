@@ -137,6 +137,8 @@ docker exec tailgate tailgate set-admin <user> true|false
 
 ## usage
 
+> [!WARNING] every certificate is published in public certificate transparency logs, which anyone can search publicly. that includes apps only on your tailnet, so the name of every app and your tailnets name are public, and stay public after you rename or remove an app. dont put anything in `tailgate.hostname` you wouldnt want people to see
+
 ### exposing a container
 
 ```yaml
