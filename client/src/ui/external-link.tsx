@@ -1,6 +1,6 @@
 import { ArrowSquareOutIcon } from "@phosphor-icons/react";
 import type { AnchorHTMLAttributes, FC } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 
 /** a link that opens in a new tab, with the icon that says so */
 export const ExternalLink: FC<AnchorHTMLAttributes<HTMLAnchorElement>> = ({
@@ -11,7 +11,7 @@ export const ExternalLink: FC<AnchorHTMLAttributes<HTMLAnchorElement>> = ({
   <a
     target="_blank"
     rel="noreferrer"
-    className={cn("inline-flex items-center gap-1 underline-offset-2 hover:underline", className)}
+    className={clsx("inline-flex items-center gap-1 underline-offset-2 hover:underline", className)}
     {...props}
   >
     {children}

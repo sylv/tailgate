@@ -1,10 +1,9 @@
 import { ExclamationMarkIcon, HourglassSimpleIcon, PauseIcon } from "@phosphor-icons/react";
 import type { FC } from "react";
 import type { NodeInfo, App, Apps } from "../../api";
-import { cn } from "../../lib/utils";
+import { clsx } from "clsx";
 import { Tooltip } from "../../ui/tooltip";
-
-export type Tone = "ok" | "idle" | "warning" | "danger" | "unused";
+import { toneText, type Tone } from "../note";
 
 export interface Status {
   tone: Tone;
@@ -59,14 +58,6 @@ export const needsAttention = (s: Apps) =>
   nodeStatus(s.tailgate).icon === "alert" ||
   s.apps.some((x) => appStatus(x).icon === "alert");
 
-export const toneText: Record<Tone, string> = {
-  ok: "text-success",
-  idle: "text-fg-faint",
-  warning: "text-warning",
-  danger: "text-danger",
-  unused: "text-brand-bright",
-};
-
 /** a ring in the status's colour, empty when it's fine, a pause when the container is
  * stopped, an hourglass while the node is on its way, a ! when something needs doing */
 export const StatusRing: FC<{ status: Status }> = ({ status }) => (
@@ -74,7 +65,7 @@ export const StatusRing: FC<{ status: Status }> = ({ status }) => (
     <span
       role="img"
       aria-label={status.label}
-      className={cn(
+      className={clsx(
         "flex size-5 items-center justify-center rounded-full border border-current",
         toneText[status.tone],
       )}

@@ -1,7 +1,15 @@
-import { SignOutIcon, WarningCircleIcon } from "@phosphor-icons/react";
+import {
+  CaretDownIcon,
+  KeyIcon,
+  SignOutIcon,
+  SquaresFourIcon,
+  WarningCircleIcon,
+} from "@phosphor-icons/react";
 import { createContext, useContext, type FC, type ReactNode } from "react";
 import { signOut, type Me, type Apps } from "../api";
-import { IconButton } from "../ui/icon-button";
+import { navigate } from "../lib/router";
+import { Button } from "../ui/button";
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Wordmark } from "../ui/logo";
 import { NavTab } from "../ui/nav-tabs";
 
@@ -39,7 +47,7 @@ export const AdminShell: FC<{
         className="no-scrollbar col-span-2 row-start-2 -mx-4 flex gap-0.5 overflow-x-auto px-4 md:col-span-1 md:col-start-2 md:row-start-1 md:mx-0 md:px-0"
       >
         {tabs.map(([path, label]) => (
-          <NavTab key={path} to={`/admin/${path}`}>
+          <NavTab key={path} href={`/admin/${path}`}>
             {label}
             {path === "apps" && attention && (
               <WarningCircleIcon weight="fill" className="size-4 text-warning" aria-label="Needs attention" />
@@ -47,14 +55,30 @@ export const AdminShell: FC<{
           </NavTab>
         ))}
       </nav>
-      <div className="flex items-center gap-1 justify-self-end md:col-start-3 md:row-start-1">
-        <a href="/" className="text-[13px] text-fg-muted underline-offset-2 hover:text-fg hover:underline">
-          {name}
-        </a>
-        <IconButton label="Sign out" size="sm" className="-mr-1.5" onClick={() => signOut("/login")}>
-          <SignOutIcon />
-        </IconButton>
-      </div>
+      <Menu>
+        <MenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            iconEnd={<CaretDownIcon />}
+            className="-mr-2.5 justify-self-end md:col-start-3 md:row-start-1"
+          >
+            {name}
+          </Button>
+        </MenuTrigger>
+        <MenuContent align="end">
+          <MenuItem icon={<SquaresFourIcon />} onSelect={() => navigate("/")}>
+            Your apps
+          </MenuItem>
+          <MenuItem icon={<KeyIcon />} onSelect={() => navigate("/sign-in-methods")}>
+            Sign-in methods
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem icon={<SignOutIcon />} onSelect={() => signOut("/login")}>
+            Sign out
+          </MenuItem>
+        </MenuContent>
+      </Menu>
     </header>
     <main className="mx-auto w-full max-w-5xl flex-1 px-4 pt-10 pb-24 md:px-8">{children}</main>
   </div>

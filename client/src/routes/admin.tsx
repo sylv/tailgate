@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Navigate, Route, Routes } from "react-router";
 import { type Me, type Apps } from "../api";
 import { AdminContext, AdminShell } from "../components/admin-shell";
 import { needsAttention } from "../components/apps/status";
 import { NarrowPage } from "../components/narrow-page";
 import { PasskeyPrompt, SignInForm } from "../components/sign-in";
 import { useApi } from "../hooks/use-api";
+import { Redirect, usePath } from "../lib/router";
 import { Button } from "../ui/button";
 import { OIDCRoute } from "./admin_oidc";
 import { RulesRoute } from "./admin_rules";
@@ -38,11 +38,10 @@ export default function AdminRoutes() {
   }
   // a tailnet login is any device its owner left unlocked, so changing tailgate takes a key
   if (me.via === "tailnet") {
-    if (prompt) return <PasskeyPrompt me={me} />;
+    if (prompt) return <PasskeyPrompt />;
     return (
       <NarrowPage
         brand
-        me={me}
         title="Sign in to use the admin pages"
         description={`You're on the tailnet as ${me.login}. The admin pages need your key or a passkey too`}
       >
@@ -61,16 +60,23 @@ function Admin({ me }: { me: Me }) {
     <AdminContext value={{ me, apps, reloadApps, appIDs }}>
       <AdminShell attention={attention} name={me.user!.name}>
         {appsError && <p className="mb-6 text-[13px] text-danger">{appsError}</p>}
-        <Routes>
-          <Route index element={<Navigate to="users" replace />} />
-          <Route path="users" element={<UsersRoute />} />
-          <Route path="users/:id" element={<UserRoute />} />
-          <Route path="apps" element={<AppsRoute />} />
-          <Route path="rules" element={<RulesRoute />} />
-          <Route path="oidc" element={<OIDCRoute />} />
-          <Route path="*" element={<Navigate to="users" replace />} />
-        </Routes>
+        <Page />
       </AdminShell>
     </AdminContext>
   );
+}
+
+function Page() {
+  const [, , page, id] = usePath().split("/");
+  switch (page) {
+    case "users":
+      return id ? <UserRoute id={id} /> : <UsersRoute />;
+    case "apps":
+      return <AppsRoute />;
+    case "rules":
+      return <RulesRoute />;
+    case "oidc":
+      return <OIDCRoute />;
+  }
+  return <Redirect to="/admin/users" />;
 }

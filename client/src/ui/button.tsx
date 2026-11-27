@@ -1,6 +1,6 @@
 import { Slot } from "radix-ui";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { Spinner } from "./spinner";
 
 // slim and flat. one primary per view at most, secondary is a 1px border, ghost has
@@ -56,7 +56,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     },
     ref,
   ) => {
-    const classes = cn(BASE, BUTTON_VARIANTS[variant], BUTTON_SIZES[size], className);
+    const classes = clsx(BASE, BUTTON_VARIANTS[variant], BUTTON_SIZES[size], className);
     if (asChild) {
       return (
         <Slot.Root ref={ref} className={classes} {...props}>

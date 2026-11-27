@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,6 +30,7 @@ const csp = "default-src 'none'; script-src 'self'; style-src 'self'; font-src '
 func (g *gate) web(funnel bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", g.page)
+	mux.HandleFunc("GET /sign-in-methods", g.page)
 	mux.HandleFunc("GET /login", g.login)
 	mux.Handle("GET /assets/", assets(ui))
 
@@ -149,14 +151,19 @@ func (g *gate) tailnetOnly(mux *http.ServeMux) {
 	}))
 }
 
+// page serves the ui, with how the visitor came and which request loaded the page in
+// it for the footer, for when they need help
 func (g *gate) page(w http.ResponseWriter, r *http.Request) {
 	if index() == nil {
 		plain(w, r, http.StatusServiceUnavailable, "ui was not built into this binary")
 		return
 	}
+	// json.Marshal escapes <, > and &, so nothing in it can end the script tag
+	data, _ := json.Marshal(map[string]string{"request": requestOf(r.Context()).id, "ingress": node.Ingress(r.Context())})
+	tag := `<script type="application/json" id="tailgate">` + string(data) + `</script>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(index())
+	w.Write(bytes.Replace(index(), []byte("</head>"), []byte(tag+"</head>"), 1))
 }
 
 // login skips the login page when the visitor is already signed in and can
@@ -294,14 +301,12 @@ func (g *gate) me(_ http.ResponseWriter, r *http.Request, id *identity) (any, er
 		// PasskeysOn is TAILGATE_PASSKEYS
 		PasskeysOn bool `json:"passkeysOn"`
 		// CanAddPasskey is whether this session may add one, if the browser can
-		CanAddPasskey bool `json:"canAddPasskey"`
-		// Ingress and RequestID are for the page footer, so a visitor can say how they came and which request it was
-		Ingress   string `json:"ingress"`
-		RequestID string `json:"requestId"`
-	}{Apps: []link{}, PasskeysOn: g.passkeys, Ingress: node.Ingress(r.Context()), RequestID: requestOf(r.Context()).id}
+		CanAddPasskey bool   `json:"canAddPasskey"`
+		Ingress       string `json:"ingress"`
+	}{Apps: []link{}, PasskeysOn: g.passkeys, Ingress: node.Ingress(r.Context())}
 	// client is the oidc client the login page is signing in to
 	var client *store.OIDCClient
-	if clientID := r.URL.Query().Get("client"); clientID != "" {
+	if clientID := r.URL.Query().Get("client_id"); clientID != "" {
 		var err error
 		if client, err = g.db.OIDCClient(clientID); err != nil {
 			return nil, err

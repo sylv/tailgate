@@ -28,7 +28,7 @@ export const Logins: FC<{ user: UserDetail; reload: () => void }> = ({ user, rel
       {user.logins.length > 0 && (
         <List>
           {user.logins.map((l) => (
-            <Row key={l.id} className="flex items-center gap-3 py-2">
+            <Row key={l.id} className="flex items-center gap-3 py-2!">
               <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{l.name}</span>
               <Button
                 variant="ghost"

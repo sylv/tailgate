@@ -106,7 +106,7 @@ func TestOIDC(t *testing.T) {
 	if rec := authorize("app.photos:///cb", clientID, signedIn); rec.Header().Get("Location") != "" {
 		t.Errorf("no email got a redirect to %q", rec.Header().Get("Location"))
 	}
-	me := do(tg.web, "GET", "https://tailgate.ts.net/api/me?client="+clientID, signedIn)
+	me := do(tg.web, "GET", "https://tailgate.ts.net/api/me?client_id="+clientID, signedIn)
 	if !strings.Contains(me.Body.String(), "has no email") {
 		t.Errorf("me without an email got %s", me.Body)
 	}

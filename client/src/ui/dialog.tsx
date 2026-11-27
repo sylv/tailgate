@@ -1,8 +1,7 @@
 import { XIcon } from "@phosphor-icons/react";
-import { AnimatePresence, motion, useDragControls, type PanInfo } from "motion/react";
-import { useEffect, useId, useRef, type FC, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FC, type PointerEvent, type ReactNode } from "react";
 import { useIsMobile } from "../hooks/use-mobile";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { IconButton } from "./icon-button";
 
 // lyra's dialog. the header and footer never scroll away, only the body between them does.
@@ -26,14 +25,18 @@ export interface DialogProps {
 }
 
 const WIDTHS = { sm: "max-w-sm", md: "max-w-lg", lg: "max-w-3xl" };
-const EASE_OUT = [0.22, 1, 0.36, 1] as const;
 
-export const Dialog: FC<DialogProps> = (props) => (
-  <AnimatePresence>{props.open && <Panel key="dialog" {...props} />}</AnimatePresence>
-);
+// it stays up after open goes false until its exit animation ends
+export const Dialog: FC<DialogProps> = (props) => {
+  const [shown, setShown] = useState(props.open);
+  if (props.open && !shown) setShown(true);
+  return shown ? <Panel {...props} onExited={() => setShown(false)} /> : null;
+};
 
-const Panel: FC<DialogProps> = ({
+const Panel: FC<DialogProps & { onExited: () => void }> = ({
+  open,
   onOpenChange,
+  onExited,
   title,
   description,
   footer,
@@ -42,7 +45,6 @@ const Panel: FC<DialogProps> = ({
   className,
 }) => {
   const mobile = useIsMobile();
-  const drag = useDragControls();
   const dialog = useRef<HTMLDialogElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
@@ -59,16 +61,33 @@ const Panel: FC<DialogProps> = ({
     return () => d.close();
   }, []);
 
-  const startDrag = (event: PointerEvent, fromBody: boolean) => {
-    if (!mobile) return;
+  // the sheet follows the finger down, and a little way up. on the window rather than
+  // captured, so a tap on the close button still clicks it
+  const startDrag = (e: PointerEvent, fromBody: boolean) => {
+    const p = panel.current!;
     const scroller = body.current;
-    if (fromBody && scroller && scroller.scrollHeight > scroller.clientHeight) return;
-    drag.start(event);
-  };
-
-  const endDrag = (_: unknown, info: PanInfo) => {
-    const height = panel.current?.offsetHeight ?? 400;
-    if (info.offset.y > Math.min(160, height * 0.25) || info.velocity.y > 600) close();
+    if (!mobile || !open || (fromBody && scroller && scroller.scrollHeight > scroller.clientHeight)) return;
+    const start = e.clientY;
+    let last = { y: start, t: e.timeStamp };
+    let speed = 0;
+    p.style.transition = "none";
+    const move = (m: globalThis.PointerEvent) => {
+      speed = (m.clientY - last.y) / Math.max(1, m.timeStamp - last.t);
+      last = { y: m.clientY, t: m.timeStamp };
+      const dy = m.clientY - start;
+      p.style.transform = `translateY(${dy > 0 ? dy : dy * 0.08}px)`;
+    };
+    const end = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", end);
+      removeEventListener("pointercancel", end);
+      if (last.y - start > Math.min(160, p.offsetHeight * 0.25) || speed > 0.6) return close();
+      p.style.transition = "transform 200ms var(--ease-out)";
+      p.style.transform = "";
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", end);
+    addEventListener("pointercancel", end);
   };
 
   return (
@@ -82,47 +101,32 @@ const Panel: FC<DialogProps> = ({
       }}
       className="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none overflow-hidden bg-transparent p-0 text-fg backdrop:bg-transparent"
     >
-      <motion.div
-        className="fixed inset-0 bg-black/70"
+      <div
+        className={clsx("fixed inset-0 bg-black/70", open ? "animate-fade-in" : "animate-fade-out")}
         onClick={close}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1, transition: { duration: 0.18, ease: EASE_OUT } }}
-        exit={{ opacity: 0, transition: { duration: 0.12 } }}
       />
-      <motion.div
+      <div
         ref={panel}
-        className={cn(
+        // an exit that starts mid drag goes on from where the finger left it
+        onAnimationEnd={(e) => !open && e.target === e.currentTarget && onExited()}
+        className={clsx(
           "fixed flex flex-col shadow-pop outline-none",
           mobile
             ? // the sheet's colour carries on below it, for when it's stretched upwards
-              "inset-x-0 bottom-0 max-h-[92dvh] rounded-t-lg border-t border-line bg-raised after:absolute after:inset-x-0 after:top-full after:h-[50dvh] after:bg-raised"
-            : cn(
+              clsx(
+                "inset-x-0 bottom-0 max-h-[92dvh] rounded-t-lg border-t border-line bg-raised after:absolute after:inset-x-0 after:top-full after:h-[50dvh] after:bg-raised",
+                open ? "animate-sheet-in" : "animate-sheet-out",
+              )
+            : clsx(
                 "top-1/2 left-1/2 max-h-[85dvh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-line bg-raised",
                 WIDTHS[size],
+                open ? "animate-dialog-in" : "animate-dialog-out",
               ),
           className,
         )}
-        {...(mobile
-          ? {
-              initial: { y: "100%" },
-              animate: { y: 0, transition: { duration: 0.24, ease: EASE_OUT } },
-              exit: { y: "100%", transition: { duration: 0.18, ease: [0.5, 0, 0.75, 0] } },
-              drag: "y" as const,
-              dragControls: drag,
-              dragListener: false,
-              dragConstraints: { top: 0, bottom: 0 },
-              dragElastic: { top: 0.08, bottom: 1 },
-              dragTransition: { bounceStiffness: 500, bounceDamping: 40 },
-              onDragEnd: endDrag,
-            }
-          : {
-              initial: { opacity: 0, y: 10, scale: 0.97 },
-              animate: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.18, ease: EASE_OUT } },
-              exit: { opacity: 0, y: 4, scale: 0.98, transition: { duration: 0.1 } },
-            })}
       >
         <div
-          className={cn("flex shrink-0 flex-col", mobile && "touch-none")}
+          className={clsx("flex shrink-0 flex-col", mobile && "touch-none")}
           onPointerDown={(e) => startDrag(e, false)}
         >
           {mobile && (
@@ -130,7 +134,7 @@ const Panel: FC<DialogProps> = ({
               <span className="h-1.5 w-10 rounded-full bg-line" />
             </div>
           )}
-          <div className={cn("flex items-start gap-4 px-5 pb-3", mobile ? "pt-2" : "pt-4")}>
+          <div className={clsx("flex items-start gap-4 px-5 pb-3", mobile ? "pt-2" : "pt-4")}>
             <div className="min-w-0 flex-1 pt-0.5">
               <h2 id={titleId} className="text-base">
                 {title}
@@ -156,7 +160,7 @@ const Panel: FC<DialogProps> = ({
             {footer}
           </div>
         )}
-      </motion.div>
+      </div>
     </dialog>
   );
 };

@@ -1,6 +1,6 @@
 import { Checkbox as C } from "radix-ui";
 import { useId, type FC, type ReactNode } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { FOCUS_RING } from "./button";
 import { CheckIcon } from "@phosphor-icons/react";
 
@@ -17,7 +17,11 @@ export const Checkbox: FC<{
   return (
     <label
       htmlFor={id}
-      className={cn("flex cursor-pointer items-start gap-2.5", disabled && "pointer-events-none", className)}
+      className={clsx(
+        "flex cursor-pointer items-start gap-2.5",
+        disabled && "pointer-events-none",
+        className,
+      )}
     >
       <span className="flex h-5 items-center">
         <C.Root
@@ -25,7 +29,7 @@ export const Checkbox: FC<{
           checked={checked}
           onCheckedChange={(v) => onCheckedChange(v === true)}
           disabled={disabled}
-          className={cn(
+          className={clsx(
             "inline-flex size-[18px] shrink-0 items-center justify-center rounded-[5px] border-[1.5px] border-line-strong hover:border-fg-muted",
             "data-[state=checked]:border-brand data-[state=checked]:bg-brand data-[state=checked]:hover:border-brand-hover data-[state=checked]:hover:bg-brand-hover",
             "disabled:opacity-45",
@@ -37,7 +41,7 @@ export const Checkbox: FC<{
           </C.Indicator>
         </C.Root>
       </span>
-      <span className={cn("min-w-0 flex-1", disabled && "opacity-45")}>
+      <span className={clsx("min-w-0 flex-1", disabled && "opacity-45")}>
         <span className="block text-sm text-fg">{label}</span>
         {description && <span className="mt-0.5 block text-[13px] text-fg-muted">{description}</span>}
       </span>

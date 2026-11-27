@@ -1,5 +1,5 @@
 import { forwardRef, type InputHTMLAttributes, type ReactNode, type TextareaHTMLAttributes } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 
 // a 1px border on whatever the field sits on, lighter under the pointer and
 // brand-bright while typing. all instant
@@ -10,18 +10,20 @@ export const FIELD =
   "aria-invalid:border-danger aria-invalid:ring-1 aria-invalid:ring-danger disabled:opacity-45";
 
 // ios zooms into a field with text under 16px when it's focused
-const ZOOM = "text-sm pointer-coarse:text-base";
+const text = (mono?: boolean) => clsx(mono ? "font-mono text-[13px]" : "text-sm", "pointer-coarse:text-base");
 
-export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
-  ({ className, ...props }, ref) => (
-    <input ref={ref} className={cn(FIELD, "h-8 px-3", ZOOM, className)} {...props} />
+type Mono = { mono?: boolean };
+
+export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & Mono>(
+  ({ className, mono, ...props }, ref) => (
+    <input ref={ref} className={clsx(FIELD, "h-8 px-3", text(mono), className)} {...props} />
   ),
 );
 Input.displayName = "Input";
 
-export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  ({ className, ...props }, ref) => (
-    <textarea ref={ref} className={cn(FIELD, "min-h-20 px-3 py-2", ZOOM, className)} {...props} />
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & Mono>(
+  ({ className, mono, ...props }, ref) => (
+    <textarea ref={ref} className={clsx(FIELD, "min-h-20 px-3 py-2", text(mono), className)} {...props} />
   ),
 );
 Textarea.displayName = "Textarea";
@@ -37,7 +39,7 @@ export const Field = ({
   children: ReactNode;
   className?: string;
 }) => (
-  <label className={cn("flex flex-col gap-1.5", className)}>
+  <label className={clsx("flex flex-col gap-1.5", className)}>
     <span className="text-[13px] font-medium text-fg-muted">{label}</span>
     {children}
     {hint && <span className="text-xs text-fg-faint">{hint}</span>}
@@ -55,7 +57,7 @@ export const Labelled = ({
   children: ReactNode;
   className?: string;
 }) => (
-  <div className={cn("flex min-w-0 flex-col gap-1.5", className)}>
+  <div className={clsx("flex min-w-0 flex-col gap-1.5", className)}>
     <span className="text-[13px] font-medium text-fg-muted">{label}</span>
     {children}
   </div>

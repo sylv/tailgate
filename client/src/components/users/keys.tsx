@@ -3,7 +3,7 @@ import { api, type NewKey, type UserDetail } from "../../api";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { ErrorText, List, Section } from "../section";
-import { Methods } from "./passkeys";
+import { Methods } from "./methods";
 
 export const Keys: FC<{ user: UserDetail; reload: () => void; onKey: (k: NewKey) => void }> = ({
   user,

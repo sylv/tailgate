@@ -5,7 +5,7 @@ import { Empty, List, Section } from "../components/section";
 import { Note } from "../components/note";
 import { nodeStatus, appStatus, StatusRing, type Status } from "../components/apps/status";
 import { Until } from "../lib/time";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { Button } from "../ui/button";
 import { CopyField } from "../ui/copy-field";
 import { ExternalLink } from "../ui/external-link";
@@ -26,7 +26,7 @@ export function AppsRoute() {
           </Note>
         ))}
       </div>
-      <div className={cn("hidden gap-x-6 px-4 pb-2 text-xs text-fg-faint md:grid", COLUMNS)}>
+      <div className={clsx("hidden gap-x-6 px-4 pb-2 text-xs text-fg-faint md:grid", COLUMNS)}>
         <span>Name</span>
         <span>Reachable on</span>
         <span>Login</span>
@@ -99,7 +99,7 @@ function Row({
 }) {
   return (
     <li className="px-4 py-3">
-      <div className={cn("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6", COLUMNS)}>
+      <div className={clsx("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6", COLUMNS)}>
         <div className="min-w-0">
           {url ? (
             <ExternalLink href={url} className="text-fg">

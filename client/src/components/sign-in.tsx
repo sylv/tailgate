@@ -103,13 +103,12 @@ export const SignInForm: FC<{ me: Me; offerPasskey: () => void }> = ({ me, offer
 };
 
 /** asks to add a passkey after a key sign in, then carries on */
-export const PasskeyPrompt: FC<{ me: Me }> = ({ me }) => {
+export const PasskeyPrompt: FC = () => {
   const [never, setNever] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   return (
     <NarrowPage
-      me={me}
       title="Add a passkey?"
       description="Next time, sign in on this device with your fingerprint, face or screen lock instead of your key"
     >

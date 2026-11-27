@@ -1,6 +1,5 @@
 import { ArrowLeftIcon, DotsThreeIcon, KeyIcon, TrashIcon } from "@phosphor-icons/react";
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
 import { api, type NewKey, type User, type UserDetail } from "../api";
 import { PageHeader } from "../components/admin-shell";
 import { Confirm } from "../components/confirm";
@@ -10,6 +9,7 @@ import { Keys } from "../components/users/keys";
 import { Logins } from "../components/users/logins";
 import { UserForm } from "../components/users/user-form";
 import { useApi } from "../hooks/use-api";
+import { navigate } from "../lib/router";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/icon-button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "../ui/menu";
@@ -18,14 +18,11 @@ const blank: User = { id: "", name: "", note: "", email: "", admin: false, allAp
 
 const Back = () => (
   <Button variant="link" size="sm" icon={<ArrowLeftIcon />} asChild className="mb-3">
-    <Link to="/admin/users">Users</Link>
+    <a href="/admin/users">Users</a>
   </Button>
 );
 
-export function UserRoute() {
-  const { id } = useParams();
-  const navigate = useNavigate();
-
+export function UserRoute({ id }: { id: string }) {
   if (id === "new") {
     return (
       <>
@@ -37,18 +34,17 @@ export function UserRoute() {
             saveLabel="Create user"
             onSave={async (u) => {
               const res = await api<{ id: string }>("POST", "/api/admin/users", u);
-              navigate(`/admin/users/${res.id}`, { replace: true });
+              navigate(`/admin/users/${res.id}`, true);
             }}
           />
         </div>
       </>
     );
   }
-  return <ExistingUser id={id!} />;
+  return <ExistingUser id={id} />;
 }
 
 function ExistingUser({ id }: { id: string }) {
-  const navigate = useNavigate();
   const [users, error, reload] = useApi<UserDetail[]>("/api/admin/users", true);
   const [confirming, setConfirming] = useState<"reset" | "delete">();
   const [revealed, setRevealed] = useState<{ k: NewKey; title: string }>();

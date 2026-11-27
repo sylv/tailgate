@@ -6,13 +6,9 @@ import { useApi } from "../hooks/use-api";
 import { Button } from "../ui/button";
 
 export function LoginRoute() {
-  const q = new URLSearchParams(location.search);
-  // an app signing in through oidc names its app like ?to= does
-  const target: Record<string, string> =
-    location.pathname === "/oidc/authorize"
-      ? { client: q.get("client_id") ?? "" }
-      : { to: q.get("to") ?? "" };
-  const [me, loadError] = useApi<Me>("/api/me?" + new URLSearchParams(target));
+  // /api/me reads the app from the page's own query, ?to= here or ?client_id= for oidc.
+  // the server puts the answer in the page under this same path
+  const [me, loadError] = useApi<Me>("/api/me" + location.search);
   const [prompt, setPrompt] = useState(false);
 
   if (loadError) return <NarrowPage title="Can't sign in" description={loadError} />;
@@ -23,7 +19,7 @@ export function LoginRoute() {
 
   if (me.error) {
     return (
-      <NarrowPage title="Can't sign in" description={me.error} me={me}>
+      <NarrowPage title="Can't sign in" description={me.error}>
         <Button variant="link" asChild>
           <a href="/">Go to your apps</a>
         </Button>
@@ -34,7 +30,6 @@ export function LoginRoute() {
   if (me.user) {
     return (
       <NarrowPage
-        me={me}
         title={`No access to ${app ?? "this"}`}
         description={
           <>
@@ -52,13 +47,12 @@ export function LoginRoute() {
     );
   }
 
-  if (prompt) return <PasskeyPrompt me={me} />;
+  if (prompt) return <PasskeyPrompt />;
 
   return (
     <NarrowPage
       title={signIn}
       description={me.passkeysOn ? "Use a passkey or the key you were given" : "Use the key you were given"}
-      me={me}
     >
       <SignInForm me={me} offerPasskey={() => setPrompt(true)} />
     </NarrowPage>

@@ -1,6 +1,6 @@
 import { Slot } from "radix-ui";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { BUTTON_VARIANTS, FOCUS_RING, type ButtonVariant } from "./button";
 import { Spinner } from "./spinner";
 import { Tooltip } from "./tooltip";
@@ -20,7 +20,6 @@ export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
   variant?: ButtonVariant;
   size?: IconButtonSize;
   tooltip?: boolean;
-  pressed?: boolean;
   loading?: boolean;
   asChild?: boolean;
   children: ReactNode;
@@ -33,7 +32,6 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
       variant = "ghost",
       size = "md",
       tooltip = true,
-      pressed,
       loading,
       asChild,
       className,
@@ -49,15 +47,13 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(
         ref={ref}
         type={asChild ? undefined : "button"}
         aria-label={label}
-        aria-pressed={pressed}
         disabled={disabled || loading}
-        className={cn(
+        className={clsx(
           "relative inline-flex shrink-0 items-center justify-center rounded-md select-none",
           "disabled:pointer-events-none disabled:opacity-45",
           FOCUS_RING,
           BUTTON_VARIANTS[variant],
           SIZES[size],
-          pressed && "bg-raised text-fg",
           className,
         )}
         {...props}

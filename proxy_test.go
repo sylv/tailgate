@@ -125,6 +125,18 @@ func TestSignedOut(t *testing.T) {
 	}
 }
 
+func TestPageRequestID(t *testing.T) {
+	tg := newTestGate(t)
+	// ci doesn't build the ui, so the test brings its own page
+	built := index
+	index = func() []byte { return []byte("<html><head></head></html>") }
+	t.Cleanup(func() { index = built })
+	rec := do(tg.web, "GET", "https://tailgate.ts.net/", page())
+	if id := rec.Header().Get(requestIDHeader); id == "" || !strings.Contains(rec.Body.String(), `"request":"`+id+`"`) {
+		t.Fatalf("page doesn't name its request %q: %s", id, rec.Body)
+	}
+}
+
 func TestLoginFlow(t *testing.T) {
 	tg := newTestGate(t)
 	api := http.Header{"Origin": {"https://tailgate.ts.net"}, "Content-Type": {"application/json"}}

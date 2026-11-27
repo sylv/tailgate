@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { FOCUS_RING } from "./button";
 import { CaretUpDownIcon } from "@phosphor-icons/react";
 import { Menu, MenuContent, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./menu";
@@ -40,7 +40,7 @@ export const Select = <V extends string>({
     <Menu onOpenChange={onOpenChange}>
       <MenuTrigger
         aria-label={label}
-        className={cn(
+        className={clsx(
           "inline-flex min-w-0 items-center gap-2 rounded-md border border-line text-fg select-none",
           "hover:bg-raised active:bg-pressed data-[state=open]:bg-raised",
           FOCUS_RING,
@@ -50,12 +50,12 @@ export const Select = <V extends string>({
           className,
         )}
       >
-        <span className={cn("min-w-0 flex-1 truncate text-left font-medium", !current && "text-fg-faint")}>
+        <span className={clsx("min-w-0 flex-1 truncate text-left font-medium", !current && "text-fg-faint")}>
           {current?.label ?? placeholder}
         </span>
         <CaretUpDownIcon className="text-fg-faint" />
       </MenuTrigger>
-      <MenuContent className="min-w-(--radix-dropdown-menu-trigger-width)">
+      <MenuContent className="min-w-(--radix-dropdown-menu-trigger-width)!">
         {options.length === 0 && empty && <p className="px-2 py-1.5 text-[13px] text-fg-muted">{empty}</p>}
         <MenuRadioGroup value={value} onValueChange={(v) => onValueChange(v as V)}>
           {options.map((o) => (

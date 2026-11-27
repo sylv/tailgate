@@ -1,6 +1,6 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
 import type { FC, LiHTMLAttributes, ReactNode } from "react";
-import { cn } from "../../lib/utils";
+import { clsx } from "clsx";
 
 // the path a request takes, drawn as a line down the left with each step on it.
 // the marker column hangs into the page's gutter, so the text lines up with the
@@ -19,7 +19,7 @@ export const FlowStep: FC<LiHTMLAttributes<HTMLLIElement> & { marker: ReactNode 
   ...props
 }) => (
   <li
-    className={cn("relative grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-3 md:gap-x-5", className)}
+    className={clsx("relative grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-3 md:gap-x-5", className)}
     {...props}
   >
     <span className="relative flex h-[38px] justify-center">{marker}</span>
@@ -34,7 +34,7 @@ export const Stage: FC<{ title: string; description?: string; className?: string
   description,
   className,
 }) => (
-  <li className={cn("relative mb-1 grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-3 md:gap-x-5", className)}>
+  <li className={clsx("relative mb-1 grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-3 md:gap-x-5", className)}>
     <span className="relative flex h-12 items-center justify-center">
       <span className="flex size-6 items-center justify-center rounded-full border border-line-strong bg-raised text-fg">
         <CaretDownIcon weight="bold" className="size-3" />
@@ -48,5 +48,5 @@ export const Stage: FC<{ title: string; description?: string; className?: string
 );
 
 export const Dot: FC<{ className?: string }> = ({ className }) => (
-  <span className={cn("mt-[15px] size-2 rounded-full ring-4 ring-surface", className)} />
+  <span className={clsx("mt-[15px] size-2 rounded-full ring-4 ring-surface", className)} />
 );

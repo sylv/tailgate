@@ -1,17 +1,20 @@
-import { useState, type FC, type ReactNode } from "react";
-import type { Me } from "../api";
+import type { FC, ReactNode } from "react";
 import { Wordmark } from "../ui/logo";
 
+// the server puts how the visitor came and which request loaded the page in it
+const { request, ingress }: { request?: string; ingress?: string } = JSON.parse(
+  document.getElementById("tailgate")?.textContent || "{}",
+);
+
 // one narrow column in the middle of the window, a little above centre. only admins
-// see the wordmark, everyone else sees the name of the app they're signing in to
+// see the wordmark, everyone else sees the name of the app they're signing in to.
+// the footer is for when a visitor needs help
 export const NarrowPage: FC<{
   title?: ReactNode;
   description?: ReactNode;
   children?: ReactNode;
   brand?: boolean;
-  // me puts how the visitor got here and the request id in the footer, for when they need help
-  me?: Me;
-}> = ({ title, description, children, brand, me }) => (
+}> = ({ title, description, children, brand }) => (
   <div className="mx-auto flex min-h-dvh w-full max-w-sm flex-col px-4">
     <main className="my-auto pt-12 pb-[18vh]">
       {brand && (
@@ -23,17 +26,11 @@ export const NarrowPage: FC<{
       {description && <p className="mt-1 text-sm text-fg-muted">{description}</p>}
       {children && <div className="mt-6">{children}</div>}
     </main>
-    {me && <Footer me={me} />}
+    {request && (
+      <footer className="pb-4 text-center text-xs text-fg-faint">
+        {ingress === "funnel" ? "via Funnel" : "via tailnet"}, request{" "}
+        <span className="font-mono select-all">{request}</span>
+      </footer>
+    )}
   </div>
 );
-
-// the request id is the page's first, live reloads would change it
-const Footer: FC<{ me: Me }> = ({ me }) => {
-  const [requestId] = useState(me.requestId);
-  return (
-    <footer className="pb-4 text-center text-xs text-fg-faint">
-      {me.ingress === "funnel" ? "via Funnel" : "via tailnet"}, request{" "}
-      <span className="font-mono select-all">{requestId}</span>
-    </footer>
-  );
-};

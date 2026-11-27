@@ -61,7 +61,6 @@ export interface Me {
   // whether this session may add a passkey, if the browser can
   canAddPasskey: boolean;
   ingress: "tailnet" | "funnel";
-  requestId: string;
 }
 
 export interface NewKey {

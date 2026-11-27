@@ -47,13 +47,13 @@ export function OIDCRoute() {
           ) : (
             <List>
               {open === "new" && (
-                <Row className="py-4">
+                <Row className="py-4!">
                   <ClientForm client={blank} onDone={done} />
                 </Row>
               )}
               {list.clients.map((c) =>
                 open === c.id ? (
-                  <Row key={c.id} className="py-4">
+                  <Row key={c.id} className="py-4!">
                     <ClientForm client={c} onDone={done} onDelete={() => setDeleting(c)} />
                   </Row>
                 ) : (

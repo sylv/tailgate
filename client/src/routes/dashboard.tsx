@@ -4,19 +4,17 @@ import { signOut, type Me } from "../api";
 import { NarrowPage } from "../components/narrow-page";
 import { Note } from "../components/note";
 import { Empty, ErrorText } from "../components/section";
-import { Methods } from "../components/users/passkeys";
+import { Methods } from "../components/users/methods";
 import { useApi } from "../hooks/use-api";
 import { addPasskey, cancelled, passkeysSupported } from "../lib/passkeys";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { Button } from "../ui/button";
 
-export function DashboardRoute() {
+export function DashboardRoute({ methods }: { methods: boolean }) {
   const [me, error, reload] = useApi<Me>("/api/me", true);
-  const [methods, setMethods] = useState(false);
 
   if (error) return <NarrowPage title="Something went wrong" description={error} />;
   if (!me) return null;
-  document.title = "Your apps";
   if (!me.user) {
     location.replace("/login");
     return null;
@@ -24,7 +22,6 @@ export function DashboardRoute() {
 
   return (
     <NarrowPage
-      me={me}
       title={me.user.name}
       description={me.via === "tailnet" ? `Signed in through the tailnet as ${me.login}` : "Signed in"}
     >
@@ -38,13 +35,13 @@ export function DashboardRoute() {
             <li key={s.name}>
               <a
                 href={s.why ? undefined : s.url}
-                className={cn(
+                className={clsx(
                   "group flex h-11 items-center justify-between gap-4 px-4",
                   s.why ? "pointer-events-none" : "hover:bg-raised",
                 )}
               >
                 <span
-                  className={cn(
+                  className={clsx(
                     "truncate underline-offset-2 group-hover:underline",
                     s.why && "text-fg-muted",
                   )}
@@ -73,9 +70,9 @@ export function DashboardRoute() {
             <a href="/admin">Admin</a>
           </Button>
         )}
-        {hasMethods(me) && (
-          <Button variant="link" onClick={() => setMethods(!methods)}>
-            {methods ? "Apps" : "Sign-in methods"}
+        {(methods || hasMethods(me)) && (
+          <Button variant="link" asChild>
+            <a href={methods ? "/" : "/sign-in-methods"}>{methods ? "Apps" : "Sign-in methods"}</a>
           </Button>
         )}
         <span className="flex-1" />

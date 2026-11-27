@@ -72,7 +72,7 @@ export const ClientForm: FC<{
       )}
       <Field label="Redirect URIs" hint="One per line">
         <Textarea
-          className="font-mono text-[13px]"
+          mono
           value={uris}
           placeholder={"https://photos.example.ts.net/auth/login\napp.immich:///oauth-callback"}
           onChange={(e) => setURIs(e.target.value)}
@@ -82,7 +82,7 @@ export const ClientForm: FC<{
       </Field>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {onDelete && (
-          <Button variant="ghost" className="mr-auto -ml-3.5 text-danger" onClick={onDelete}>
+          <Button variant="ghost" className="mr-auto -ml-3.5 text-danger!" onClick={onDelete}>
             Delete
           </Button>
         )}

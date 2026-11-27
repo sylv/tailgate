@@ -1,5 +1,5 @@
 import { useState, type FC } from "react";
-import { cn } from "../lib/utils";
+import { clsx } from "clsx";
 import { IconButton } from "./icon-button";
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 
@@ -11,7 +11,7 @@ export const CopyField: FC<{ value: string; label: string; className?: string }>
 }) => {
   const [copied, setCopied] = useState(false);
   return (
-    <div className={cn("flex h-8 min-w-0 items-center rounded-md border border-line pl-3", className)}>
+    <div className={clsx("flex h-8 min-w-0 items-center rounded-md border border-line pl-3", className)}>
       <code className="min-w-0 flex-1 truncate font-mono text-[13px] select-all">{value}</code>
       <IconButton
         label={copied ? "Copied" : `Copy ${label}`}

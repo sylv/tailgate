@@ -1,5 +1,4 @@
 import { CaretRightIcon, PlusIcon } from "@phosphor-icons/react";
-import { Link } from "react-router";
 import { type UserDetail } from "../api";
 import { PageHeader } from "../components/admin-shell";
 import { Empty, ErrorText, List } from "../components/section";
@@ -16,7 +15,7 @@ export function UsersRoute() {
         title="Users"
         actions={
           <Button variant="primary" icon={<PlusIcon weight="bold" />} asChild>
-            <Link to="/admin/users/new">Add user</Link>
+            <a href="/admin/users/new">Add user</a>
           </Button>
         }
       />
@@ -45,8 +44,8 @@ function UserRow({ user }: { user: UserDetail }) {
   ].filter(Boolean);
   return (
     <li>
-      <Link
-        to={`/admin/users/${user.id}`}
+      <a
+        href={`/admin/users/${user.id}`}
         className="group grid grid-cols-[2rem_minmax(0,1fr)_1rem] items-center gap-x-4 px-4 py-3 hover:bg-raised md:grid-cols-[2rem_minmax(0,1fr)_minmax(0,14rem)_9rem_1rem]"
       >
         <span className="flex size-8 items-center justify-center rounded-full border border-line text-[13px] font-medium text-fg-muted uppercase">
@@ -76,7 +75,7 @@ function UserRow({ user }: { user: UserDetail }) {
           )}
         </span>
         <CaretRightIcon className="size-4 text-fg-faint group-hover:text-fg" />
-      </Link>
+      </a>
     </li>
   );
 }

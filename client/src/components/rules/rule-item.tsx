@@ -9,7 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import type { FC, ReactNode } from "react";
 import type { Effect, Rule, RuleError, Schema } from "../../api";
-import { cn } from "../../lib/utils";
+import { clsx } from "clsx";
 import { Button } from "../../ui/button";
 import { Checkbox } from "../../ui/checkbox";
 import { IconButton } from "../../ui/icon-button";
@@ -44,7 +44,7 @@ export const RuleSummary: FC<{ rule: Rule; values: Set<string>; onOpen: () => vo
   <FlowStep marker={<Dot className={dotFor(rule)} />}>
     <button
       onClick={onOpen}
-      className={cn(
+      className={clsx(
         "group -mx-3 mb-1 grid w-[calc(100%+1.5rem)] grid-cols-[minmax(0,1fr)_auto] gap-x-6 rounded-md px-3 py-2 text-left hover:bg-raised",
         rule.mode === "off" && "opacity-55",
       )}
@@ -139,7 +139,7 @@ export const RuleEditor: FC<{
       <div className="-mx-3 mb-2 flex animate-enter flex-col gap-3 rounded-md border border-line bg-page/40 p-3">
         <div className="flex flex-wrap items-center gap-2">
           <Input
-            className="h-8 max-w-sm flex-1 basis-48 font-medium"
+            className="max-w-sm flex-1 basis-48 font-medium"
             placeholder="Name"
             aria-label="Name"
             aria-invalid={!!err("name") || undefined}
@@ -159,11 +159,11 @@ export const RuleEditor: FC<{
             <IconButton label="Move down" size="sm" disabled={last} onClick={() => onMove(1)}>
               <ArrowDownIcon />
             </IconButton>
-            <IconButton label="Remove rule" size="sm" className="hover:text-danger" onClick={onRemove}>
+            <IconButton label="Remove rule" size="sm" className="hover:text-danger!" onClick={onRemove}>
               <TrashIcon />
             </IconButton>
             {changed ? (
-              <IconButton label="Save" size="sm" loading={saving} className="text-fg" onClick={onSave}>
+              <IconButton label="Save" size="sm" loading={saving} className="text-fg!" onClick={onSave}>
                 <FloppyDiskIcon />
               </IconButton>
             ) : (
@@ -205,7 +205,8 @@ export const RuleEditor: FC<{
                 />
                 {e.type.endsWith("-header") && (
                   <Input
-                    className="w-56 font-mono text-[13px]"
+                    mono
+                    className="w-56"
                     placeholder="Header"
                     aria-label="Header"
                     value={e.name ?? ""}
