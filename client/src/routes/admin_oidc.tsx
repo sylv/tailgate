@@ -91,7 +91,7 @@ export function OIDCRoute() {
         description="The app can't sign anyone in until it has a new client"
         action="Delete client"
         onConfirm={async () => {
-          await api("DELETE", "/api/admin/oidc-clients/" + deleting!.id);
+          if (deleting) await api("DELETE", "/api/admin/oidc-clients/" + deleting.id);
           done();
         }}
       />
