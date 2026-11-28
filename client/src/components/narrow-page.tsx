@@ -28,7 +28,7 @@ export const NarrowPage: FC<{
     </main>
     {request && (
       <footer className="pb-4 text-center text-xs text-fg-faint">
-        request <span className="font-mono select-all">{request}</span> {ingress === "funnel" ? "via Funnel" : "via tailnet"},
+        request <span className="font-mono select-all">{request}</span> {ingress === "funnel" ? "via Funnel" : "via tailnet"}
       </footer>
     )}
   </div>
